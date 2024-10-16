@@ -13,6 +13,12 @@ ALTITUDE_NUMBERS = ['140', '160', '180', '200']  # Номера папок по 
 SENSOR_WIDTH_MM = 36.0  # Ширина сенсора в мм
 SENSOR_HEIGHT_MM = 24.0  # Высота сенсора в мм
 
+# Константы для математических вычислений
+EARTH_RADIUS_M = 6371000  # Радиус Земли в метрах
+METER_TO_CM = 100
+CM_TO_METER = 0.01
+OBJECT_SIZE_M = 1.0  # Размер объекта в метрах для расчета size_in_pixels
+
 def get_decimal_from_dms(dms, ref):
     """Преобразует координаты GPS из формата DMS в градусы."""
     degrees = dms.values[0].num / dms.values[0].den
@@ -44,7 +50,6 @@ def parse_gps(tags):
 
 def haversine(lat1, lon1, lat2, lon2):
     """Вычисляет расстояние между двумя GPS координатами по формуле."""
-    R = 6371000  # Радиус Земли в метрах
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
     delta_phi = math.radians(lat2 - lat1)
@@ -52,7 +57,7 @@ def haversine(lat1, lon1, lat2, lon2):
     a = math.sin(delta_phi / 2.0) ** 2 + \
         math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2.0) ** 2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    meters = R * c
+    meters = EARTH_RADIUS_M * c
     return meters
 
 def calculate_field_of_view(sensor_size_mm, focal_length_mm):
@@ -66,11 +71,9 @@ def main():
     print("Сканирование каталогов для поиска изображений...")
     files_to_process = []
     for folder_name, _, filenames in os.walk(ROOT_DIR):
-        # Получаем список всех частей пути к папке
-        folder_parts = os.path.normpath(folder_name).split(os.sep)
-        # Проверяем, содержит ли какая-либо часть пути номера высот
-        if any(num in part for part in folder_parts for num in ALTITUDE_NUMBERS):
-            folder = os.path.basename(folder_name)
+        folder = os.path.basename(folder_name)
+        # Проверяем, содержит ли имя текущей папки номера высот
+        if any(num in folder for num in ALTITUDE_NUMBERS):
             for filename in filenames:
                 if filename.lower().endswith(('.jpg', '.jpeg')):
                     file_path = os.path.join(folder_name, filename)
@@ -168,13 +171,13 @@ def main():
 
         # Размеры на земле и разрешение
         if None not in (focal_length, altitude, image_width, image_height):
-            altitude_cm = altitude * 100  # Переводим в см
+            altitude_cm = altitude * METER_TO_CM  # Переводим в см
             gsd_horizontal = (altitude_cm * SENSOR_WIDTH_MM) / (focal_length * image_width)
             gsd_vertical = (altitude_cm * SENSOR_HEIGHT_MM) / (focal_length * image_height)
-            width_meters = (gsd_horizontal * image_width) / 100  # Переводим см в метры
-            height_meters = (gsd_vertical * image_height) / 100
+            width_meters = (gsd_horizontal * image_width) * CM_TO_METER  # Переводим см в метры
+            height_meters = (gsd_vertical * image_height) * CM_TO_METER
             resolution_cm_per_pixel = (gsd_horizontal + gsd_vertical) / 2
-            size_in_pixels = 100 / resolution_cm_per_pixel  # Для объекта размером 1 метр
+            size_in_pixels = (OBJECT_SIZE_M * METER_TO_CM) / resolution_cm_per_pixel  # Для объекта размером 1 метр
 
             data['width_meters'] = round(width_meters, 3)
             data['height_meters'] = round(height_meters, 3)
