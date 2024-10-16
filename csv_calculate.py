@@ -2,6 +2,7 @@ import os
 import exifread
 import math
 import csv
+import hashlib
 import pandas as pd
 from datetime import datetime
 
@@ -9,18 +10,17 @@ from datetime import datetime
 ROOT_DIR = r'C:\Users\mkolp\OneDrive\Документы\Датасет'  # Корневой каталог с изображениями
 OUTPUT_CSV = 'output.csv'  # Имя выходного CSV файла
 OUTPUT_EXCEL = 'output.xlsx'  # Имя выходного Excel файла
-ALTITUDE_NUMBERS = ['140', '160', '180', '200']  # Номера папок по высоте съемки
-SENSOR_WIDTH_MM = 36.0  # Ширина сенсора в мм
-SENSOR_HEIGHT_MM = 24.0  # Высота сенсора в мм
+SENSOR_WIDTH_MM = 36.0  # Ширина сенсора в мм (для камеры Zenmuse P1)
+SENSOR_HEIGHT_MM = 24.0  # Высота сенсора в мм (для камеры Zenmuse P1)
 
 # Константы для математических вычислений
 EARTH_RADIUS_M = 6371000  # Радиус Земли в метрах
-METER_TO_CM = 100
-CM_TO_METER = 0.01
+METER_TO_CM = 100  # Коэффициент перевода метров в сантиметры
+CM_TO_METER = 0.01  # Коэффициент перевода сантиметров в метры
 OBJECT_SIZE_M = 1.0  # Размер объекта в метрах для расчета size_in_pixels
 
 def get_decimal_from_dms(dms, ref):
-    """Преобразует координаты GPS из формата DMS в градусы."""
+    """Преобразует координаты GPS из формата DMS в десятичные градусы."""
     degrees = dms.values[0].num / dms.values[0].den
     minutes = dms.values[1].num / dms.values[1].den
     seconds = dms.values[2].num / dms.values[2].den
@@ -33,23 +33,42 @@ def get_decimal_from_dms(dms, ref):
 def parse_gps(tags):
     """Извлекает информацию GPS из EXIF тегов."""
     latitude = longitude = altitude = None
-    gps_tags = ['GPS GPSLatitude', 'GPS GPSLatitudeRef',
-                'GPS GPSLongitude', 'GPS GPSLongitudeRef', 'GPS GPSAltitude']
+    gps_tags = {
+        'GPS GPSLatitude': 'latitude',
+        'GPS GPSLatitudeRef': 'lat_ref',
+        'GPS GPSLongitude': 'longitude',
+        'GPS GPSLongitudeRef': 'lon_ref',
+        'GPS GPSAltitude': 'altitude',
+        'GPS GPSAltitudeRef': 'altitude_ref',
+    }
 
-    if all(tag in tags for tag in gps_tags):
-        lat = tags['GPS GPSLatitude']
-        lat_ref = tags['GPS GPSLatitudeRef'].values
-        lon = tags['GPS GPSLongitude']
-        lon_ref = tags['GPS GPSLongitudeRef'].values
-        alt = tags['GPS GPSAltitude']
+    gps_data = {}
+    for tag, key in gps_tags.items():
+        if tag in tags:
+            gps_data[key] = tags[tag]
+
+    if 'latitude' in gps_data and 'lat_ref' in gps_data and \
+       'longitude' in gps_data and 'lon_ref' in gps_data and \
+       'altitude' in gps_data:
+        lat = gps_data['latitude']
+        lat_ref = gps_data['lat_ref'].values
+        lon = gps_data['longitude']
+        lon_ref = gps_data['lon_ref'].values
+        alt = gps_data['altitude']
+        alt_ref = gps_data.get('altitude_ref', None)
 
         latitude = get_decimal_from_dms(lat, lat_ref)
         longitude = get_decimal_from_dms(lon, lon_ref)
         altitude = alt.values[0].num / alt.values[0].den
+
+        # Если AltitudeRef существует и равно 1, высота ниже уровня моря
+        if alt_ref and alt_ref.values[0] == 1:
+            altitude = -altitude
+
     return latitude, longitude, altitude
 
 def haversine(lat1, lon1, lat2, lon2):
-    """Вычисляет расстояние между двумя GPS координатами по формуле."""
+    """Вычисляет расстояние между двумя GPS координатами по формуле гаверсинусов."""
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
     delta_phi = math.radians(lat2 - lat1)
@@ -64,20 +83,28 @@ def calculate_field_of_view(sensor_size_mm, focal_length_mm):
     """Вычисляет угол обзора в градусах."""
     return 2 * math.degrees(math.atan(sensor_size_mm / (2 * focal_length_mm)))
 
+def compute_file_hash(file_path):
+    """Вычисляет хеш файла для обнаружения дубликатов."""
+    hasher = hashlib.md5()
+    with open(file_path, 'rb') as afile:
+        buf = afile.read()
+        hasher.update(buf)
+    return hasher.hexdigest()
+
 def main():
     data_list = []
+    hash_set = set()  # Множество для хранения хешей файлов
+    duplicates_found = False  # Флаг наличия дубликатов
 
     # Собираем список всех файлов для обработки
     print("Сканирование каталогов для поиска изображений...")
     files_to_process = []
     for folder_name, _, filenames in os.walk(ROOT_DIR):
         folder = os.path.basename(folder_name)
-        # Проверяем, содержит ли имя текущей папки номера высот
-        if any(num in folder for num in ALTITUDE_NUMBERS):
-            for filename in filenames:
-                if filename.lower().endswith(('.jpg', '.jpeg')):
-                    file_path = os.path.join(folder_name, filename)
-                    files_to_process.append((file_path, folder, filename))
+        for filename in filenames:
+            if filename.lower().endswith(('.jpg', '.jpeg')):
+                file_path = os.path.join(folder_name, filename)
+                files_to_process.append((file_path, folder, filename))
     total_files = len(files_to_process)
     print(f"Найдено {total_files} изображений для обработки.")
 
@@ -86,6 +113,15 @@ def main():
     for idx, (file_path, folder, filename) in enumerate(files_to_process, 1):
         print(f"Обработка файла {idx}/{total_files}: {filename}")
         try:
+            # Вычисляем хеш файла для обнаружения дубликатов
+            file_hash = compute_file_hash(file_path)
+            if file_hash in hash_set:
+                print(f"Предупреждение: Обнаружен дубликат файла {filename}. Запись будет пропущена.")
+                duplicates_found = True
+                continue  # Пропускаем обработку этого файла
+            else:
+                hash_set.add(file_hash)
+
             with open(file_path, 'rb') as f:
                 tags = exifread.process_file(f, details=False)
 
@@ -133,6 +169,9 @@ def main():
                 data_list.append(data)
         except Exception as e:
             print(f"Ошибка при обработке файла {filename}: {e}")
+
+    if duplicates_found:
+        print("Обнаружены дубликаты файлов. Проверьте предупреждения выше.")
 
     # Преобразуем время съемки в объект datetime и сортируем данные
     print("Сортировка данных по времени съемки...")
