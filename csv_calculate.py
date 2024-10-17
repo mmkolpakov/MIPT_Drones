@@ -5,6 +5,13 @@ import csv
 import hashlib
 import pandas as pd
 from datetime import datetime
+from shapely.geometry import box
+from shapely.strtree import STRtree
+from pyproj import Proj, Transformer
+from dateutil import parser
+from shapely import __version__ as shapely_version
+from packaging import version
+import requests  # Добавлено для работы с open-elevation API
 
 # Настраиваемые параметры
 ROOT_DIR = r'C:\Users\mkolp\OneDrive\Документы\Датасет'  # Корневой каталог с изображениями
@@ -14,9 +21,6 @@ SENSOR_WIDTH_MM = 36.0  # Ширина сенсора в мм (для камер
 SENSOR_HEIGHT_MM = 24.0  # Высота сенсора в мм (для камеры Zenmuse P1)
 
 # Константы для математических вычислений
-EARTH_RADIUS_M = 6371000  # Радиус Земли в метрах
-METER_TO_CM = 100  # Коэффициент перевода метров в сантиметры
-CM_TO_METER = 0.01  # Коэффициент перевода сантиметров в метры
 OBJECT_SIZE_M = 1.0  # Размер объекта в метрах для расчета size_in_pixels
 
 def get_decimal_from_dms(dms, ref):
@@ -30,16 +34,14 @@ def get_decimal_from_dms(dms, ref):
         decimal = -decimal
     return decimal
 
-def parse_gps(tags):
-    """Извлекает информацию GPS из EXIF тегов."""
+def parse_gps_and_altitude(tags):
+    """Извлекает GPS информацию и высоту из EXIF тегов."""
     latitude = longitude = altitude = None
     gps_tags = {
         'GPS GPSLatitude': 'latitude',
         'GPS GPSLatitudeRef': 'lat_ref',
         'GPS GPSLongitude': 'longitude',
         'GPS GPSLongitudeRef': 'lon_ref',
-        'GPS GPSAltitude': 'altitude',
-        'GPS GPSAltitudeRef': 'altitude_ref',
     }
 
     gps_data = {}
@@ -47,37 +49,27 @@ def parse_gps(tags):
         if tag in tags:
             gps_data[key] = tags[tag]
 
-    if 'latitude' in gps_data and 'lat_ref' in gps_data and \
-       'longitude' in gps_data and 'lon_ref' in gps_data and \
-       'altitude' in gps_data:
+    if all(k in gps_data for k in ('latitude', 'lat_ref', 'longitude', 'lon_ref')):
         lat = gps_data['latitude']
         lat_ref = gps_data['lat_ref'].values
         lon = gps_data['longitude']
         lon_ref = gps_data['lon_ref'].values
-        alt = gps_data['altitude']
-        alt_ref = gps_data.get('altitude_ref', None)
 
         latitude = get_decimal_from_dms(lat, lat_ref)
         longitude = get_decimal_from_dms(lon, lon_ref)
-        altitude = alt.values[0].num / alt.values[0].den
 
-        # Если AltitudeRef существует и равно 1, высота ниже уровня моря
+    # Используем GPSAltitude (абсолютная высота)
+    if 'GPS GPSAltitude' in tags:
+        alt = tags['GPS GPSAltitude']
+        altitude = alt.values[0].num / alt.values[0].den
+        # Проверяем AltitudeRef
+        alt_ref = tags.get('GPS GPSAltitudeRef')
         if alt_ref and alt_ref.values[0] == 1:
             altitude = -altitude
+    else:
+        altitude = None
 
     return latitude, longitude, altitude
-
-def haversine(lat1, lon1, lat2, lon2):
-    """Вычисляет расстояние между двумя GPS координатами по формуле гаверсинусов."""
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    delta_phi = math.radians(lat2 - lat1)
-    delta_lambda = math.radians(lon2 - lon1)
-    a = math.sin(delta_phi / 2.0) ** 2 + \
-        math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2.0) ** 2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    meters = EARTH_RADIUS_M * c
-    return meters
 
 def calculate_field_of_view(sensor_size_mm, focal_length_mm):
     """Вычисляет угол обзора в градусах."""
@@ -87,9 +79,30 @@ def compute_file_hash(file_path):
     """Вычисляет хеш файла для обнаружения дубликатов."""
     hasher = hashlib.md5()
     with open(file_path, 'rb') as afile:
-        buf = afile.read()
-        hasher.update(buf)
+        # Чтение файла по частям для эффективности
+        for chunk in iter(lambda: afile.read(65536), b''):
+            hasher.update(chunk)
     return hasher.hexdigest()
+
+def get_terrain_elevation(lat, lon):
+    """Получает высоту местности по заданным координатам из open-elevation API."""
+    try:
+        url = f'https://api.open-elevation.com/api/v1/lookup?locations={lat},{lon}'
+        response = requests.get(url)
+        if response.status_code == 200:
+            results = response.json()['results']
+            if results:
+                elevation = results[0]['elevation']
+                return elevation
+            else:
+                print(f"Не удалось получить высоту для координат ({lat}, {lon})")
+                return None
+        else:
+            print(f"Ошибка запроса к API open-elevation: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"Ошибка при получении высоты местности для координат ({lat}, {lon}): {e}")
+        return None
 
 def main():
     data_list = []
@@ -100,17 +113,56 @@ def main():
     print("Сканирование каталогов для поиска изображений...")
     files_to_process = []
     for folder_name, _, filenames in os.walk(ROOT_DIR):
-        folder = os.path.basename(folder_name)
         for filename in filenames:
             if filename.lower().endswith(('.jpg', '.jpeg')):
                 file_path = os.path.join(folder_name, filename)
-                files_to_process.append((file_path, folder, filename))
+                relative_path = os.path.relpath(file_path, ROOT_DIR)
+                files_to_process.append((file_path, relative_path, filename))
     total_files = len(files_to_process)
     print(f"Найдено {total_files} изображений для обработки.")
 
+    # Собираем все координаты для определения области покрытия
+    print("Извлечение координат из фотографий...")
+    latitudes = []
+    longitudes = []
+    for idx, (file_path, relative_path, filename) in enumerate(files_to_process, 1):
+        with open(file_path, 'rb') as f:
+            tags = exifread.process_file(f, details=False)
+            latitude, longitude, altitude = parse_gps_and_altitude(tags)
+            if latitude is not None and longitude is not None:
+                latitudes.append(latitude)
+                longitudes.append(longitude)
+
+    if not latitudes or not longitudes:
+        print("Не удалось получить координаты из фотографий. Проверьте наличие GPS данных.")
+        return
+
+    # Определяем bounding box
+    min_lat, max_lat = min(latitudes), max(latitudes)
+    min_lon, max_lon = min(longitudes), max(longitudes)
+    print(f"Определена область покрытия: ({min_lat}, {min_lon}) - ({max_lat}, {max_lon})")
+
+    # Вычисляем средние широту и долготу
+    mean_lat = sum(latitudes) / len(latitudes)
+    mean_lon = sum(longitudes) / len(longitudes)
+
+    # Вычисляем номер зоны UTM
+    utm_zone_number = int((mean_lon + 180) / 6) + 1
+    hemisphere = 'north' if mean_lat >= 0 else 'south'
+    print(f"Вычислена зона UTM: {utm_zone_number}, полушарие: {hemisphere}")
+
+    # Инициализируем преобразователь координат без использования CRS
+    proj_wgs84 = Proj('epsg:4326')
+    # Задаем проекцию UTM с учетом полушария
+    if hemisphere == 'north':
+        proj_utm = Proj(proj='utm', zone=utm_zone_number, ellps='WGS84', datum='WGS84', units='m')
+    else:
+        proj_utm = Proj(proj='utm', zone=utm_zone_number, ellps='WGS84', datum='WGS84', units='m', south=True)
+    transformer = Transformer.from_proj(proj_wgs84, proj_utm)
+
     # Обрабатываем каждый файл
     print("Начинаем обработку изображений...")
-    for idx, (file_path, folder, filename) in enumerate(files_to_process, 1):
+    for idx, (file_path, relative_path, filename) in enumerate(files_to_process, 1):
         print(f"Обработка файла {idx}/{total_files}: {filename}")
         try:
             # Вычисляем хеш файла для обнаружения дубликатов
@@ -125,15 +177,34 @@ def main():
             with open(file_path, 'rb') as f:
                 tags = exifread.process_file(f, details=False)
 
-                # Извлекаем данные GPS
-                latitude, longitude, altitude = parse_gps(tags)
+                if not tags:
+                    print(f"Предупреждение: EXIF-данные не найдены в файле {filename}.")
+                    continue
+
+                # Извлекаем данные GPS и высоту
+                latitude, longitude, altitude = parse_gps_and_altitude(tags)
+
+                # Получаем высоту местности и вычисляем относительную высоту
+                if latitude is not None and longitude is not None:
+                    terrain_elevation = get_terrain_elevation(latitude, longitude)
+                    if terrain_elevation is not None and altitude is not None:
+                        relative_altitude = altitude - terrain_elevation
+                    else:
+                        relative_altitude = None
+                else:
+                    terrain_elevation = None
+                    relative_altitude = None
 
                 # Извлекаем время съемки
                 datetime_original = tags.get('EXIF DateTimeOriginal', tags.get('Image DateTime'))
                 if datetime_original:
-                    datetime_original = datetime_original.values
+                    dt_str = datetime_original.values
+                    try:
+                        shooting_time = parser.parse(dt_str)
+                    except (ValueError, TypeError):
+                        shooting_time = None
                 else:
-                    datetime_original = None
+                    shooting_time = None
 
                 # Извлекаем размеры изображения
                 image_width = tags.get('EXIF ExifImageWidth', tags.get('Image ImageWidth'))
@@ -155,16 +226,36 @@ def main():
                 else:
                     focal_length = None
 
+                # Извлекаем DigitalZoomRatio
+                digital_zoom_ratio_tag = tags.get('EXIF DigitalZoomRatio') or tags.get('DigitalZoomRatio')
+                if digital_zoom_ratio_tag:
+                    try:
+                        digital_zoom_ratio = float(str(digital_zoom_ratio_tag.values))
+                    except (ValueError, TypeError):
+                        digital_zoom_ratio = 1.0  # По умолчанию 1.0, если не удалось преобразовать
+                else:
+                    digital_zoom_ratio = 1.0
+
+                # Корректируем фокусное расстояние с учетом DigitalZoomRatio
+                if focal_length:
+                    effective_focal_length = focal_length * digital_zoom_ratio
+                else:
+                    effective_focal_length = None
+
                 data = {
                     'filename': filename,
-                    'folder': folder,
+                    'relative_path': relative_path,
                     'latitude': latitude,
                     'longitude': longitude,
                     'altitude': altitude,
-                    'shooting_time': datetime_original,
+                    'terrain_elevation': terrain_elevation,
+                    'relative_altitude': relative_altitude,
+                    'shooting_time': shooting_time,
                     'image_width': image_width,
                     'image_height': image_height,
                     'focal_length': focal_length,
+                    'digital_zoom_ratio': digital_zoom_ratio,
+                    'effective_focal_length': effective_focal_length,
                 }
                 data_list.append(data)
         except Exception as e:
@@ -173,50 +264,56 @@ def main():
     if duplicates_found:
         print("Обнаружены дубликаты файлов. Проверьте предупреждения выше.")
 
-    # Преобразуем время съемки в объект datetime и сортируем данные
+    # Сортируем данные по времени съемки
     print("Сортировка данных по времени съемки...")
-    for data in data_list:
-        dt_str = data['shooting_time']
-        if dt_str:
-            try:
-                data['shooting_time'] = datetime.strptime(dt_str, '%Y:%m:%d %H:%M:%S')
-            except ValueError:
-                # Обработка случая, если формат времени отличается
-                try:
-                    data['shooting_time'] = datetime.strptime(dt_str, '%Y-%m-%d %H:%M:%S')
-                except ValueError:
-                    data['shooting_time'] = None
-        else:
-            data['shooting_time'] = None
-
     data_list.sort(key=lambda x: x['shooting_time'] or datetime.min)
+
+    # Устанавливаем референсную точку
+    if data_list:
+        ref_lat = data_list[0]['latitude']
+        ref_lon = data_list[0]['longitude']
+        if ref_lat is None or ref_lon is None:
+            print("Референсная точка не имеет корректных координат.")
+            return
+        ref_x, ref_y = transformer.transform(ref_lon, ref_lat)
+    else:
+        print("Нет данных для обработки.")
+        return
 
     # Вычисляем дополнительные параметры
     print("Вычисление дополнительных параметров...")
     previous_data = None
 
     for idx, data in enumerate(data_list, 1):
-        focal_length = data['focal_length']
-        altitude = data['altitude']
+        effective_focal_length = data['effective_focal_length']
+        relative_altitude = data['relative_altitude']
         image_width = data['image_width']
         image_height = data['image_height']
+        latitude = data['latitude']
+        longitude = data['longitude']
 
-        # Угол обзора
-        if focal_length:
-            data['fov_horizontal'] = calculate_field_of_view(SENSOR_WIDTH_MM, focal_length)
-            data['fov_vertical'] = calculate_field_of_view(SENSOR_HEIGHT_MM, focal_length)
-        else:
-            data['fov_horizontal'] = data['fov_vertical'] = None
+        if effective_focal_length is None or effective_focal_length == 0:
+            print(f"Предупреждение: Недостаточно данных для вычисления параметров изображения {data['filename']}.")
+            continue
+
+        # Углы обзора
+        data['fov_horizontal'] = calculate_field_of_view(SENSOR_WIDTH_MM, effective_focal_length)
+        data['fov_vertical'] = calculate_field_of_view(SENSOR_HEIGHT_MM, effective_focal_length)
 
         # Размеры на земле и разрешение
-        if None not in (focal_length, altitude, image_width, image_height):
-            altitude_cm = altitude * METER_TO_CM  # Переводим в см
-            gsd_horizontal = (altitude_cm * SENSOR_WIDTH_MM) / (focal_length * image_width)
-            gsd_vertical = (altitude_cm * SENSOR_HEIGHT_MM) / (focal_length * image_height)
-            width_meters = (gsd_horizontal * image_width) * CM_TO_METER  # Переводим см в метры
-            height_meters = (gsd_vertical * image_height) * CM_TO_METER
-            resolution_cm_per_pixel = (gsd_horizontal + gsd_vertical) / 2
-            size_in_pixels = (OBJECT_SIZE_M * METER_TO_CM) / resolution_cm_per_pixel  # Для объекта размером 1 метр
+        if None not in (relative_altitude, image_width, image_height):
+            # Приводим всё к метрам
+            sensor_width_m = SENSOR_WIDTH_MM / 1000  # мм в метры
+            sensor_height_m = SENSOR_HEIGHT_MM / 1000
+            focal_length_m = effective_focal_length / 1000
+            altitude_m = relative_altitude  # Используем относительную высоту
+
+            gsd_horizontal = (altitude_m * sensor_width_m) / (focal_length_m * image_width)
+            gsd_vertical = (altitude_m * sensor_height_m) / (focal_length_m * image_height)
+            width_meters = gsd_horizontal * image_width
+            height_meters = gsd_vertical * image_height
+            resolution_cm_per_pixel = ((gsd_horizontal + gsd_vertical) / 2) * 100  # Метры в сантиметры
+            size_in_pixels = (OBJECT_SIZE_M * 100) / resolution_cm_per_pixel  # Для объекта размером 1 метр
 
             data['width_meters'] = round(width_meters, 3)
             data['height_meters'] = round(height_meters, 3)
@@ -226,20 +323,87 @@ def main():
             data['width_meters'] = data['height_meters'] = data['resolution_cm_per_pixel'] = data['size_in_pixels'] = None
 
         # Расстояние до предыдущего снимка
-        if previous_data and None not in (data['latitude'], data['longitude'], previous_data['latitude'], previous_data['longitude']):
-            distance = haversine(previous_data['latitude'], previous_data['longitude'], data['latitude'], data['longitude'])
+        if previous_data and None not in (latitude, longitude, previous_data['latitude'], previous_data['longitude']):
+            # Используем геодезическое расстояние из pyproj
+            lon1, lat1 = previous_data['longitude'], previous_data['latitude']
+            lon2, lat2 = longitude, latitude
+            x1, y1 = transformer.transform(lon1, lat1)
+            x2, y2 = transformer.transform(lon2, lat2)
+            distance = math.hypot(x2 - x1, y2 - y1)
             data['distance_to_previous'] = round(distance, 2)
         else:
             data['distance_to_previous'] = None
 
+        # Преобразование координат в метры относительно референсной точки
+        if None not in (latitude, longitude):
+            x, y = transformer.transform(longitude, latitude)
+            data['x'] = x - ref_x
+            data['y'] = y - ref_y
+        else:
+            data['x'] = data['y'] = None
+
         previous_data = data
+
+    # Создание полигонов
+    print("Создание полигонов для каждого изображения...")
+    polygons = []
+    polygon_data = []
+    for data in data_list:
+        if None not in (data['x'], data['y'], data['width_meters'], data['height_meters']):
+            half_width = data['width_meters'] / 2
+            half_height = data['height_meters'] / 2
+            polygon = box(
+                data['x'] - half_width,
+                data['y'] - half_height,
+                data['x'] + half_width,
+                data['y'] + half_height
+            )
+            data['polygon'] = polygon
+            data['area'] = data['width_meters'] * data['height_meters']
+            data['overlap_area'] = 0.0
+            polygons.append(polygon)
+            polygon_data.append(data)
+        else:
+            data['polygon'] = None
+            data['area'] = None
+            data['overlap_area'] = None
+
+    # Создание пространственного индекса
+    print("Расчет перекрытия между фотографиями...")
+    if polygons:
+        tree = STRtree(polygons)
+        for idx_data, data in enumerate(polygon_data):
+            if data['polygon'] is None:
+                continue
+            possible_indices = tree.query(data['polygon'])
+            for idx in possible_indices:
+                if idx == idx_data:
+                    continue
+                other_polygon = polygons[idx]
+                other_data = polygon_data[idx]
+                if data['polygon'].intersects(other_polygon):
+                    intersection = data['polygon'].intersection(other_polygon)
+                    overlap_area = intersection.area
+                    data['overlap_area'] += overlap_area
+                    other_data['overlap_area'] += overlap_area
+    else:
+        print("Нет полигонов для расчета перекрытия.")
+
+    # Вычисление процента перекрытия
+    for data in data_list:
+        if data['overlap_area'] is not None and data['area'] is not None and data['area'] != 0:
+            data['overlap_percentage'] = round((data['overlap_area'] / data['area']) * 100, 2)
+        else:
+            data['overlap_percentage'] = None
 
     # Записываем данные в CSV
     print(f"Запись данных в файл {OUTPUT_CSV}...")
     headers = [
-        'filename', 'folder', 'latitude', 'longitude', 'altitude', 'fov_horizontal',
-        'shooting_time', 'image_width', 'image_height', 'width_meters', 'height_meters',
-        'resolution_cm_per_pixel', 'distance_to_previous', 'size_in_pixels'
+        'filename', 'relative_path', 'latitude', 'longitude', 'altitude',
+        'terrain_elevation', 'relative_altitude', 'fov_horizontal', 'fov_vertical',
+        'shooting_time', 'image_width', 'image_height', 'width_meters',
+        'height_meters', 'resolution_cm_per_pixel', 'distance_to_previous',
+        'size_in_pixels', 'overlap_percentage', 'digital_zoom_ratio'
     ]
 
     try:
@@ -248,20 +412,25 @@ def main():
             writer.writeheader()
             for data in data_list:
                 row = {
-                    'filename': data['filename'],
-                    'folder': data['folder'],
-                    'latitude': data['latitude'],
-                    'longitude': data['longitude'],
-                    'altitude': data['altitude'],
-                    'fov_horizontal': data['fov_horizontal'],
+                    'filename': data.get('filename', ''),
+                    'relative_path': data.get('relative_path', ''),
+                    'latitude': data.get('latitude', ''),
+                    'longitude': data.get('longitude', ''),
+                    'altitude': data.get('altitude', ''),
+                    'terrain_elevation': data.get('terrain_elevation', ''),
+                    'relative_altitude': data.get('relative_altitude', ''),
+                    'fov_horizontal': data.get('fov_horizontal', ''),
+                    'fov_vertical': data.get('fov_vertical', ''),
                     'shooting_time': data['shooting_time'].strftime('%Y-%m-%d %H:%M:%S') if data['shooting_time'] else '',
-                    'image_width': data['image_width'],
-                    'image_height': data['image_height'],
-                    'width_meters': data['width_meters'],
-                    'height_meters': data['height_meters'],
-                    'resolution_cm_per_pixel': data['resolution_cm_per_pixel'],
-                    'distance_to_previous': data['distance_to_previous'],
-                    'size_in_pixels': data['size_in_pixels'],
+                    'image_width': data.get('image_width', ''),
+                    'image_height': data.get('image_height', ''),
+                    'width_meters': data.get('width_meters', ''),
+                    'height_meters': data.get('height_meters', ''),
+                    'resolution_cm_per_pixel': data.get('resolution_cm_per_pixel', ''),
+                    'distance_to_previous': data.get('distance_to_previous', ''),
+                    'size_in_pixels': data.get('size_in_pixels', ''),
+                    'overlap_percentage': data.get('overlap_percentage', ''),
+                    'digital_zoom_ratio': data.get('digital_zoom_ratio', ''),
                 }
                 writer.writerow(row)
         print("Запись в CSV завершена успешно.")
@@ -284,6 +453,50 @@ def main():
         print("Запись в Excel завершена успешно.")
     except Exception as e:
         print(f"Ошибка при записи в Excel файл: {e}")
+
+    # Анализ данных по ТЗ
+    print("Анализ данных в соответствии с техническим заданием...")
+    total_images = len(data_list)
+    if total_images == 0:
+        print("Нет данных для анализа.")
+        return
+
+    # Проверка перекрытия для высот выше 80 метров
+    images_above_80m = [d for d in data_list if d['relative_altitude'] and d['relative_altitude'] > 80]
+    images_below_80m = [d for d in data_list if d['relative_altitude'] and d['relative_altitude'] <= 80]
+
+    # Анализ перекрытия
+    overlap_criteria_above_80m = [d for d in images_above_80m if d['overlap_percentage'] is not None and d['overlap_percentage'] <= 15]
+    overlap_criteria_below_80m = [d for d in images_below_80m if d['overlap_percentage'] is not None and d['overlap_percentage'] <= 50]
+
+    percent_overlap_above_80m = len(overlap_criteria_above_80m) / len(images_above_80m) * 100 if images_above_80m else 0
+    percent_overlap_below_80m = len(overlap_criteria_below_80m) / len(images_below_80m) * 100 if images_below_80m else 0
+
+    print(f"Процент фотографий с перекрытием не более 15% (высота > 80 м): {percent_overlap_above_80m:.2f}%")
+    print(f"Процент фотографий с перекрытием не более 50% (высота ≤ 80 м): {percent_overlap_below_80m:.2f}%")
+
+    # Распределение фотографий по диапазонам высот
+    range_20_80 = [d for d in data_list if d['relative_altitude'] and 20 <= d['relative_altitude'] <= 80]
+    range_80_140 = [d for d in data_list if d['relative_altitude'] and 80 < d['relative_altitude'] <= 140]
+    range_140_200 = [d for d in data_list if d['relative_altitude'] and 140 < d['relative_altitude'] <= 200]
+
+    percent_20_80 = len(range_20_80) / total_images * 100
+    percent_80_140 = len(range_80_140) / total_images * 100
+    percent_140_200 = len(range_140_200) / total_images * 100
+
+    print(f"Процент фотографий на высоте от 20 до 80 м: {percent_20_80:.2f}%")
+    print(f"Процент фотографий на высоте от 80 до 140 м: {percent_80_140:.2f}%")
+    print(f"Процент фотографий на высоте от 140 до 200 м: {percent_140_200:.2f}%")
+
+    # Проверка формата файлов и наличия высоты
+    jpeg_images = [d for d in data_list if d['filename'].lower().endswith(('.jpg', '.jpeg'))]
+    images_with_altitude = [d for d in data_list if d['relative_altitude'] is not None]
+
+    percent_jpeg = len(jpeg_images) / total_images * 100
+    percent_with_altitude = len(images_with_altitude) / total_images * 100
+
+    print(f"Процент фотографий в формате JPEG: {percent_jpeg:.2f}%")
+    print(f"Процент фотографий с информацией о высоте: {percent_with_altitude:.2f}%")
 
     print("Обработка завершена.")
 
