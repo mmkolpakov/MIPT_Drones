@@ -7,10 +7,14 @@ import pandas as pd
 from datetime import datetime
 from shapely.geometry import box
 from shapely.strtree import STRtree
-from pyproj import Proj, Transformer
+from pyproj import CRS, Transformer
 from dateutil import parser
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from geopy.distance import geodesic
+import geopandas as gpd
+from shapely.geometry import box
+from shapely.ops import unary_union
 
 # Настраиваемые параметры
 ROOT_DIR = r'C:\Users\mkolp\OneDrive\Документы\Датасет'  # Корневой каталог с изображениями
@@ -20,6 +24,7 @@ SENSOR_WIDTH_MM = 36.0  # Ширина сенсора в мм (для камер
 SENSOR_HEIGHT_MM = 24.0  # Высота сенсора в мм (для камеры Zenmuse P1)
 OBJECT_SIZE_M = 1.0  # Размер объекта в метрах для расчета size_in_pixels
 MAX_WORKERS = 4  # Максимальное количество потоков для параллельной обработки
+MAX_FILES_TO_PROCESS = 10000  # Максимальное количество файлов для обработки
 
 def get_decimal_from_dms(dms, ref):
     """Преобразует координаты GPS из формата DMS в десятичные градусы."""
@@ -267,11 +272,11 @@ def calculate_additional_parameters(data_list):
         else:
             data['width_meters'] = data['height_meters'] = data['resolution_cm_per_pixel'] = data['size_in_pixels'] = None
 
-        # Расстояние до предыдущего снимка
+        # Расстояние до предыдущего снимка, используя геодезическое расстояние
         if previous_data and None not in (latitude, longitude, previous_data['latitude'], previous_data['longitude']):
-            x1, y1 = data['x'], data['y']
-            x2, y2 = previous_data['x'], previous_data['y']
-            distance = math.hypot(x2 - x1, y2 - y1)
+            coords_1 = (latitude, longitude)
+            coords_2 = (previous_data['latitude'], previous_data['longitude'])
+            distance = geodesic(coords_1, coords_2).meters
             data['distance_to_previous'] = round(distance, 2)
         else:
             data['distance_to_previous'] = None
@@ -282,8 +287,9 @@ def calculate_overlap(data_list):
     """Вычисляет пересечения между изображениями."""
     print("Создание полигонов для каждого изображения...")
     data_with_polygons = []
-    polygons = []
-    for data in data_list:
+    geometries = []
+    indices = []
+    for idx, data in enumerate(data_list):
         if None not in (data['x'], data['y'], data['width_meters'], data['height_meters']):
             half_width = data['width_meters'] / 2
             half_height = data['height_meters'] / 2
@@ -295,34 +301,45 @@ def calculate_overlap(data_list):
             )
             data['polygon'] = polygon
             data['area'] = data['width_meters'] * data['height_meters']
-            data['overlap_area'] = 0.0
             data_with_polygons.append(data)
-            polygons.append(polygon)
+            geometries.append(polygon)
+            indices.append(idx)
         else:
             data['polygon'] = None
             data['area'] = None
             data['overlap_area'] = 0.0
 
     if data_with_polygons:
-        tree = STRtree(polygons)
-        for idx_data, data in enumerate(data_with_polygons):
+        # Создаем GeoDataFrame
+        gdf = gpd.GeoDataFrame({'geometry': geometries}, index=indices)
+        # Строим пространственный индекс
+        sindex = gdf.sindex
+
+        for idx, data in enumerate(data_with_polygons):
             query_geom = data['polygon']
-            possible_indices = tree.query(query_geom)
-            for idx in possible_indices:
-                if idx == idx_data:
-                    continue
-                other_geom = polygons[idx]
-                other_data = data_with_polygons[idx]
-                if query_geom.intersects(other_geom):
-                    intersection = query_geom.intersection(other_geom)
-                    overlap_area = intersection.area
-                    data['overlap_area'] += overlap_area
-                    other_data['overlap_area'] += overlap_area
+            # Находим потенциально пересекающиеся геометрии
+            possible_matches_index = list(sindex.intersection(query_geom.bounds))
+            # Исключаем саму себя
+            possible_matches_index = [i for i in possible_matches_index if i != idx]
+            if possible_matches_index:
+                possible_matches = gdf.loc[possible_matches_index]
+                # Вычисляем пересечения с другими полигонами
+                intersections = possible_matches.geometry.apply(lambda geom: query_geom.intersection(geom))
+                # Объединяем все пересекающиеся области в одну
+                overlap_union = unary_union([geom for geom in intersections if not geom.is_empty])
+                # Вычисляем площадь объединённой области пересечения
+                total_overlap_area = overlap_union.area
+                data['overlap_area'] = total_overlap_area
+            else:
+                data['overlap_area'] = 0.0
     else:
-        print("No polygons available for overlap calculation.")
-    for data in data_list:
+        print("Нет полигонов для расчета перекрытия.")
+
+    # Вычисляем процент перекрытия для каждого изображения
+    for data in data_with_polygons:
         if data['overlap_area'] is not None and data['area'] is not None and data['area'] != 0:
-            data['overlap_percentage'] = round((data['overlap_area'] / data['area']) * 100, 2)
+            overlap_percentage = (data['overlap_area'] / data['area']) * 100
+            data['overlap_percentage'] = round(min(overlap_percentage, 100.0), 2)  # Ограничиваем 100%
         else:
             data['overlap_percentage'] = None
 
@@ -424,6 +441,11 @@ def main():
         print("Нет изображений для обработки.")
         return
 
+    # Ограничиваем количество файлов для обработки
+    if MAX_FILES_TO_PROCESS and total_files > MAX_FILES_TO_PROCESS:
+        files_to_process = files_to_process[:MAX_FILES_TO_PROCESS]
+        print(f"Ограничение на количество обрабатываемых изображений: {MAX_FILES_TO_PROCESS}")
+
     # Собираем все координаты для определения области покрытия
     print("Извлечение координат из фотографий...")
     latitudes = []
@@ -455,14 +477,14 @@ def main():
     hemisphere = 'north' if mean_lat >= 0 else 'south'
     print(f"Вычислена зона UTM: {utm_zone_number}, полушарие: {hemisphere}")
 
-    # Инициализируем преобразователь координат без использования CRS
-    proj_wgs84 = Proj('epsg:4326')
-    # Задаем проекцию UTM с учетом полушария
+    # Используем стандартные EPSG-коды для UTM
     if hemisphere == 'north':
-        proj_utm = Proj(proj='utm', zone=utm_zone_number, ellps='WGS84', datum='WGS84', units='m')
+        utm_epsg_code = 32600 + utm_zone_number  # EPSG-коды для северного полушария
     else:
-        proj_utm = Proj(proj='utm', zone=utm_zone_number, ellps='WGS84', datum='WGS84', units='m', south=True)
-    transformer = Transformer.from_proj(proj_wgs84, proj_utm)
+        utm_epsg_code = 32700 + utm_zone_number  # EPSG-коды для южного полушария
+
+    # Инициализируем преобразователь координат с использованием CRS
+    transformer = Transformer.from_crs("EPSG:4326", f"EPSG:{utm_epsg_code}", always_xy=True)
 
     # Устанавливаем референсную точку
     ref_lat = latitudes[0]
