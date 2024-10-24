@@ -1,4 +1,5 @@
 import os
+import random
 import exifread
 import math
 import csv
@@ -6,41 +7,49 @@ import hashlib
 import numpy as np
 import pandas as pd
 from datetime import datetime
-from shapely.geometry import box, Polygon, MultiPolygon, GeometryCollection
+from shapely.geometry import box
 from shapely.strtree import STRtree
-from pyproj import CRS, Transformer
+from pyproj import Transformer
 from dateutil import parser
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from geopy.distance import geodesic
-import geopandas as gpd
 from shapely.ops import unary_union
-from typing import List, Dict, Any
-import matplotlib.pyplot as plt
+from typing import List, Dict, Any, Tuple
 import folium
-from shapely.geometry import mapping
 import logging
 import time
-import random
-import shutil
+import itertools
+import json
+from rtree import index
 
 # Настраиваемые параметры
-ROOT_DIR = r'C:\Users\mkolp\OneDrive\Документы\Датасет'  # Корневой каталог с изображениями
+ROOT_DIR = r'C:\Users\mkolp\OneDrive\Документы\Данные для разметки\Датасет'  # Корневой каталог с изображениями
 OUTPUT_CSV = 'output.csv'  # Имя выходного CSV файла
 OUTPUT_EXCEL = 'output.xlsx'  # Имя выходного Excel файла
-SENSOR_WIDTH_MM = 36.0  # Ширина сенсора в мм (для камеры Zenmuse P1)
-SENSOR_HEIGHT_MM = 24.0  # Высота сенсора в мм (для камеры Zenmuse P1)
+SENSOR_WIDTH_MM = 36.0  # Ширина сенсора в мм
+SENSOR_HEIGHT_MM = 24.0  # Высота сенсора в мм
 OBJECT_SIZE_M = 1.0  # Размер объекта в метрах для расчета size_in_pixels
 MAX_WORKERS = 4  # Максимальное количество потоков для параллельной обработки
-MAX_FILES_TO_PROCESS = 1000  # Максимальное количество файлов для обработки
+MAX_FILES_TO_PROCESS = 10000  # Максимальное количество файлов для обработки
 
 # Параметры для выбора и копирования изображений
-NUM_IMAGES_TO_SELECT = 50  # Количество изображений для выбора
-MIN_OVERLAP_PERCENT = 20.0  # Минимальный процент перекрытия
+NUM_SETS_TO_CREATE = 2  # Количество сетов (папок) для создания
+NUM_IMAGES_PER_SET = 50  # Количество изображений в каждом сете
+OVERLAP_PERCENTAGE_BETWEEN_SETS = 20.0  # Процент одинаковых изображений между сетами
 EXCLUDE_KEYWORD = 'дети'  # Ключевое слово для исключения изображений
 DESTINATION_DIR = r'C:\Users\mkolp\OneDrive\Документы\Selected_Images'  # Папка назначения для копирования
 
+# Параметры высоты для отбора изображений
+ALTITUDE_RANGES = [(0, 200)]  # Диапазоны высот в метрах
+
+# Флаги для управления визуализацией
+VISUALIZE_ALL_IMAGES = True  # Если True, визуализируются все изображения
+VISUALIZE_SELECTED_IMAGES = True  # Если True, визуализируются отобранные изображения
+
 DEBUG = True  # Флаг отладки. Установите в True для вывода подробной информации
+
+CACHE_FILE = 'elevation_cache.json'  # Имя JSON-файла для кэширования высот
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -62,6 +71,7 @@ formatter_console = logging.Formatter('%(message)s')
 ch.setFormatter(formatter_console)
 logger.addHandler(ch)
 
+
 def get_decimal_from_dms(dms, ref):
     """Преобразует координаты GPS из формата DMS в десятичные градусы."""
     degrees = dms.values[0].num / dms.values[0].den
@@ -72,6 +82,7 @@ def get_decimal_from_dms(dms, ref):
     if ref in ['S', 'W']:
         decimal = -decimal
     return decimal
+
 
 def parse_gps_and_altitude(tags):
     """Извлекает GPS информацию и высоту из EXIF тегов."""
@@ -110,11 +121,13 @@ def parse_gps_and_altitude(tags):
 
     return latitude, longitude, altitude
 
+
 def calculate_field_of_view(sensor_size_mm, focal_length_mm):
     """Вычисляет угол обзора в градусах."""
     fov = 2 * math.degrees(math.atan(sensor_size_mm / (2 * focal_length_mm)))
     logger.debug(f"FOV (sensor_size_mm={sensor_size_mm}, focal_length_mm={focal_length_mm}): {fov} degrees")
     return fov
+
 
 def compute_file_hash(file_path):
     """Вычисляет хеш файла для обнаружения дубликатов."""
@@ -123,6 +136,7 @@ def compute_file_hash(file_path):
         for chunk in iter(lambda: afile.read(65536), b''):
             hasher.update(chunk)
     return hasher.hexdigest()
+
 
 def process_file(file_info, transformer, ref_x, ref_y, hash_set, utm_epsg_code):
     """Обрабатывает один файл изображения."""
@@ -204,6 +218,7 @@ def process_file(file_info, transformer, ref_x, ref_y, hash_set, utm_epsg_code):
             data = {
                 'filename': filename,
                 'relative_path': relative_path,
+                'file_path': file_path,
                 'latitude': latitude,
                 'longitude': longitude,
                 'altitude': altitude,
@@ -237,8 +252,34 @@ def process_file(file_info, transformer, ref_x, ref_y, hash_set, utm_epsg_code):
         logger.error(f"Ошибка при обработке файла {filename}: {e}")
         return None
 
+
+def load_cache():
+    """Загружает кэш из файла."""
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+
+def save_cache(cache):
+    """Сохраняет кэш в файл."""
+    with open(CACHE_FILE, 'w') as f:
+        json.dump(cache, f)
+
+
+def hash_coords(coords):
+    """Создает хэш для уникальной идентификации набора координат."""
+    # Сортируем координаты по значениям 'latitude' и 'longitude'
+    sorted_coords = sorted(coords, key=lambda x: (x['latitude'], x['longitude']))
+    coords_str = json.dumps(sorted_coords, ensure_ascii=False)
+    return hashlib.md5(coords_str.encode('utf-8')).hexdigest()
+
+
 def fetch_elevations(data_list):
-    """Получает высоты местности для всех точек и обновляет data_list."""
+    """Получает высоты местности для всех точек и обновляет data_list с использованием кэша."""
+    # Загружаем кэш
+    cache = load_cache()
+
     # Собираем уникальные координаты
     coords = []
     data_with_coords = []
@@ -253,8 +294,29 @@ def fetch_elevations(data_list):
         logger.info("Нет координат для получения высот местности.")
         return
 
+    # Создаем хэш для текущего набора координат
+    coords_hash = hash_coords(coords)
+
+    # Проверяем, есть ли результаты в кэше
+    if coords_hash in cache:
+        logger.info("Используем кэшированные данные высот.")
+        results = cache[coords_hash]
+        # Обновляем data_list с кэшированными высотами
+        for idx, result in enumerate(results):
+            elevation = result.get('elevation')
+            data_with_coords[idx]['terrain_elevation'] = elevation
+            altitude = data_with_coords[idx].get('altitude')
+            if elevation is not None and altitude is not None:
+                data_with_coords[idx]['relative_altitude'] = altitude - elevation
+            else:
+                data_with_coords[idx]['relative_altitude'] = None
+        return
+    else:
+        logger.info("Высоты не найдены в кэше, выполняем запрос к API...")
+
     # Разбиваем на батчи по 100 координат (ограничение API)
     batch_size = 100
+    all_results = []
     for i in range(0, len(coords), batch_size):
         batch_coords = coords[i:i + batch_size]
         batch_data = data_with_coords[i:i + batch_size]
@@ -277,7 +339,7 @@ def fetch_elevations(data_list):
                     if len(results) != len(batch_data):
                         logger.warning("Количество полученных высот не соответствует количеству точек в батче.")
                         break  # Не можем продолжить с этим батчем
-                    # Обновляем data_list с высотами
+                    # Обновляем data_list с высотами и сохраняем результаты для кэширования
                     for idx, result in enumerate(results):
                         elevation = result.get('elevation')
                         batch_data[idx]['terrain_elevation'] = elevation
@@ -287,6 +349,7 @@ def fetch_elevations(data_list):
                             logger.debug(f"[{batch_data[idx]['filename']}] Altitude: {altitude}, Terrain Elevation: {elevation}, Relative Altitude: {batch_data[idx]['relative_altitude']}")
                         else:
                             batch_data[idx]['relative_altitude'] = None
+                    all_results.extend(results)
                     success = True
                 else:
                     logger.warning(f"Ошибка запроса к API open-elevation: {response.status_code}")
@@ -310,6 +373,13 @@ def fetch_elevations(data_list):
         else:
             # Задержка между успешными запросами, чтобы не перегружать API
             time.sleep(1)
+
+    # Сохраняем результаты в кэш
+    cache[coords_hash] = all_results
+    save_cache(cache)
+
+    logger.info("Высоты успешно получены и кэшированы.")
+
 
 def calculate_additional_parameters(data_list):
     """Вычисляет дополнительные параметры для каждого изображения."""
@@ -373,13 +443,13 @@ def calculate_additional_parameters(data_list):
 
 def calculate_overlap(data_list: List[Dict[str, Any]]) -> None:
     """
-    Вычисляет перекрытия между изображениями, гарантируя отсутствие множественного счёта.
+    Вычисляет перекрытия между изображениями, гарантируя отсутствие многократного счета.
     """
     logger.info("Создание полигонов для каждого изображения...")
     data_with_polygons = []
     geometries = []
 
-    # Создаём полигоны для изображений с валидными координатами и размерами
+    # Создаем полигоны для изображений с валидными координатами и размерами
     for data in data_list:
         filename = data.get('filename', 'Unknown')
 
@@ -389,7 +459,9 @@ def calculate_overlap(data_list: List[Dict[str, Any]]) -> None:
         height = data.get('height_meters')
 
         if None in (x, y, width, height):
-            logger.warning(f"[{filename}] Отсутствуют необходимые параметры для создания полигона. Установка значений по умолчанию.")
+            logger.warning(
+                f"[{filename}] Отсутствуют необходимые параметры для создания полигона. Установка значений по умолчанию."
+            )
             data['polygon'] = None
             data['area'] = 0
             data['overlap_area'] = 0.0
@@ -412,7 +484,7 @@ def calculate_overlap(data_list: List[Dict[str, Any]]) -> None:
         half_width = width / 2
         half_height = height / 2
 
-        # Создаём полигон
+        # Создаем полигон
         polygon = box(
             x - half_width,
             y - half_height,
@@ -434,7 +506,7 @@ def calculate_overlap(data_list: List[Dict[str, Any]]) -> None:
         logger.info("Нет полигонов для расчета перекрытия.")
         return
 
-    # Создаём STRtree для поиска пересечений
+    # Создаем STRtree для поиска пересечений
     logger.info("Создание STRtree для пространственного индекса...")
     tree = STRtree(geometries)
 
@@ -444,29 +516,33 @@ def calculate_overlap(data_list: List[Dict[str, Any]]) -> None:
         data = data_with_polygons[i]
         filename = data.get('filename', 'Unknown')
 
-        # Находим индексы потенциально пересекающихся геометрий
+        # Находим геометрии, которые потенциально пересекаются с текущей
         possible_matches_idx = tree.query(geom)
 
-        # Получаем геометрии по индексам и исключаем саму себя
-        possible_matches = [geometries[idx] for idx in possible_matches_idx if idx != i]
+        # Исключаем саму себя
+        possible_matches_idx = [idx for idx in possible_matches_idx if idx != i]
 
-        if not possible_matches:
+        if not possible_matches_idx:
             data['overlap_area'] = 0.0
             continue
 
-        # Вычисляем пересечения с каждым полигоном отдельно и суммируем площади
-        total_overlap_area = 0.0
-        for match in possible_matches:
-            intersection = geom.intersection(match)
-            overlap_area = intersection.area
-            total_overlap_area += overlap_area
+        # Вычисляем объединение всех пересечений
+        overlapping_areas = []
+        for idx in possible_matches_idx:
+            other_geom = geometries[idx]
+            intersection = geom.intersection(other_geom)
+            if not intersection.is_empty:
+                overlapping_areas.append(intersection)
 
-            logger.debug(f"[{filename}] Overlap with another polygon: {overlap_area}")
-
-        # Отладочные выводы
-        logger.debug(f"[{filename}] Total overlap area: {total_overlap_area}")
+        if overlapping_areas:
+            # Объединяем все пересечения, чтобы избежать многократного счета
+            overlap_union = unary_union(overlapping_areas)
+            total_overlap_area = overlap_union.area
+        else:
+            total_overlap_area = 0.0
 
         data['overlap_area'] = total_overlap_area
+        logger.debug(f"[{filename}] Total overlap area: {total_overlap_area}")
 
     # Вычисляем процент перекрытия для каждого изображения
     logger.info("Вычисление процента перекрытия...")
@@ -512,6 +588,7 @@ def save_to_excel(data_list, headers):
     except Exception as e:
         logger.error(f"Ошибка при записи в Excel файл: {e}")
 
+
 def analyze_data(data_list):
     """Анализирует данные в соответствии с техническим заданием."""
     logger.info("Анализ данных в соответствии с техническим заданием...")
@@ -535,17 +612,13 @@ def analyze_data(data_list):
     logger.info(f"Процент фотографий с перекрытием не более 50% (высота ≤ 80 м): {percent_overlap_below_80m:.2f}%")
 
     # Распределение фотографий по диапазонам высот
-    range_20_80 = [d for d in data_list if d['relative_altitude'] and 20 <= d['relative_altitude'] <= 80]
-    range_80_140 = [d for d in data_list if d['relative_altitude'] and 80 < d['relative_altitude'] <= 140]
-    range_140_200 = [d for d in data_list if d['relative_altitude'] and 140 < d['relative_altitude'] <= 200]
-
-    percent_20_80 = len(range_20_80) / total_images * 100
-    percent_80_140 = len(range_80_140) / total_images * 100
-    percent_140_200 = len(range_140_200) / total_images * 100
-
-    logger.info(f"Процент фотографий на высоте от 20 до 80 м: {percent_20_80:.2f}%")
-    logger.info(f"Процент фотографий на высоте от 80 до 140 м: {percent_80_140:.2f}%")
-    logger.info(f"Процент фотографий на высоте от 140 до 200 м: {percent_140_200:.2f}%")
+    total_in_ranges = 0
+    for alt_range in ALTITUDE_RANGES:
+        range_name = f"{alt_range[0]}-{alt_range[1]}"
+        images_in_range = [d for d in data_list if d['relative_altitude'] and alt_range[0] <= d['relative_altitude'] <= alt_range[1]]
+        percent_in_range = len(images_in_range) / total_images * 100
+        total_in_ranges += len(images_in_range)
+        logger.info(f"Процент фотографий на высоте от {alt_range[0]} до {alt_range[1]} м: {percent_in_range:.2f}%")
 
     # Проверка формата файлов и наличия высоты
     jpeg_images = [d for d in data_list if d['filename'].lower().endswith(('.jpg', '.jpeg'))]
@@ -559,37 +632,48 @@ def analyze_data(data_list):
 
     logger.info("Обработка завершена.")
 
-def visualize_overlaps(data_list):
+
+def visualize_overlaps(data_list, selected_sets=None):
     """
     Создает интерактивную визуализацию перекрытий фотографий с помощью Folium.
     """
-    logger.info("Создание интерактивной визуализации перекрытий фотографий...")
+    if VISUALIZE_ALL_IMAGES:
+        logger.info("Создание визуализации для всех изображений...")
+        create_visualization(data_list, 'overlaps_visualization.html', "Все изображения")
 
+    if VISUALIZE_SELECTED_IMAGES and selected_sets:
+        logger.info("Создание визуализации для выбранных изображений...")
+        create_visualization_selected(selected_sets, 'selected_overlaps_visualization.html', "Выбранные изображения")
+
+
+def create_visualization(data_to_visualize, output_html, title):
     # Проверяем наличие полигонов для визуализации
-    if not any(data.get('polygon') for data in data_list):
-        logger.info("Нет полигонов для визуализации.")
+    if not any(data.get('polygon') for data in data_to_visualize):
+        logger.info(f"Нет полигонов для визуализации {title.lower()}.")
         return
 
     # Определяем центр карты
-    latitudes = [data['latitude'] for data in data_list if data['latitude'] is not None]
-    longitudes = [data['longitude'] for data in data_list if data['longitude'] is not None]
+    latitudes = [data['latitude'] for data in data_to_visualize if data['latitude'] is not None]
+    longitudes = [data['longitude'] for data in data_to_visualize if data['longitude'] is not None]
     if not latitudes or not longitudes:
-        logger.info("Нет корректных координат для визуализации.")
+        logger.info(f"Нет корректных координат для визуализации {title.lower()}.")
         return
     center_lat = sum(latitudes) / len(latitudes)
     center_lon = sum(longitudes) / len(longitudes)
 
     # Создаем карту Folium
     m = folium.Map(location=[center_lat, center_lon], zoom_start=12)
+    folium.TileLayer('cartodbpositron').add_to(m)
+    folium.LayerControl().add_to(m)
 
     # Создаем трансформер для преобразования координат обратно в WGS84
-    utm_epsg_code = data_list[0].get('utm_epsg_code')
-    ref_x = data_list[0].get('ref_x', 0)
-    ref_y = data_list[0].get('ref_y', 0)
+    utm_epsg_code = data_to_visualize[0].get('utm_epsg_code')
+    ref_x = data_to_visualize[0].get('ref_x', 0)
+    ref_y = data_to_visualize[0].get('ref_y', 0)
     transformer_to_wgs84 = Transformer.from_crs(f"EPSG:{utm_epsg_code}", "EPSG:4326", always_xy=True)
 
     # Добавляем полигоны на карту
-    for data in data_list:
+    for data in data_to_visualize:
         polygon = data.get('polygon')
         if not polygon:
             continue
@@ -626,28 +710,160 @@ def visualize_overlaps(data_list):
         folium_polygon.add_to(m)
 
     # Сохраняем карту в HTML файл
-    m.save('overlaps_visualization.html')
-    logger.info("Интерактивная визуализация сохранена в 'overlaps_visualization.html'.")
+    m.save(output_html)
+    logger.info(f"Интерактивная визуализация '{title}' сохранена в '{output_html}'.")
 
-def select_images(data_list: List[Dict[str, Any]], num_images: int, min_overlap: float, exclude_keyword: str) -> List[Dict[str, Any]]:
-    """
-    Выбирает изображения на основе заданных критериев.
 
-    :param data_list: Список словарей с данными об изображениях.
-    :param num_images: Количество изображений для выбора.
-    :param min_overlap: Минимальный процент перекрытия между изображениями.
-    :param exclude_keyword: Ключевое слово для исключения изображений.
-    :return: Список выбранных изображений.
+def create_visualization_selected(selected_sets, output_html, title):
+    # Слияние всех сетов в один список для визуализации
+    data_to_visualize = []
+    for idx, image_set in enumerate(selected_sets):
+        for data in image_set:
+            data_copy = data.copy()
+            data_copy['set_number'] = idx + 1  # Добавляем номер сета для отображения
+            data_to_visualize.append(data_copy)
+
+    # Проверяем наличие полигонов для визуализации
+    if not any(data.get('polygon') for data in data_to_visualize):
+        logger.info(f"Нет полигонов для визуализации {title.lower()}.")
+        return
+
+    # Определяем центр карты
+    latitudes = [data['latitude'] for data in data_to_visualize if data['latitude'] is not None]
+    longitudes = [data['longitude'] for data in data_to_visualize if data['longitude'] is not None]
+    if not latitudes or not longitudes:
+        logger.info(f"Нет корректных координат для визуализации {title.lower()}.")
+        return
+    center_lat = sum(latitudes) / len(latitudes)
+    center_lon = sum(longitudes) / len(longitudes)
+
+    # Создаем карту Folium
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=12)
+    folium.TileLayer('cartodbpositron').add_to(m)
+    folium.LayerControl().add_to(m)
+
+    # Создаем трансформер для преобразования координат обратно в WGS84
+    utm_epsg_code = data_to_visualize[0].get('utm_epsg_code')
+    ref_x = data_to_visualize[0].get('ref_x', 0)
+    ref_y = data_to_visualize[0].get('ref_y', 0)
+    transformer_to_wgs84 = Transformer.from_crs(f"EPSG:{utm_epsg_code}", "EPSG:4326", always_xy=True)
+
+    # Определяем цвета для каждого сета
+    set_colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
+
+    # Добавляем полигоны на карту
+    for data in data_to_visualize:
+        polygon = data.get('polygon')
+        if not polygon:
+            continue
+
+        # Преобразуем координаты полигона обратно в WGS84
+        exterior_coords = []
+        for x, y in polygon.exterior.coords:
+            lon, lat = transformer_to_wgs84.transform(x + ref_x, y + ref_y)
+            exterior_coords.append((lat, lon))
+
+        set_number = data.get('set_number', 0)
+        color = set_colors[(set_number - 1) % len(set_colors)]
+
+        # Создаем полигон Folium
+        folium_polygon = folium.Polygon(
+            locations=exterior_coords,
+            color=color,
+            weight=1,
+            fill=True,
+            fill_opacity=0.5,
+            popup=folium.Popup(
+                f"Сет: {set_number}<br>"
+                f"Файл: {data['filename']}<br>"
+                f"Высота: {data.get('relative_altitude', 'N/A')} м",
+                max_width=300
+            )
+        )
+        folium_polygon.add_to(m)
+
+    # Сохраняем карту в HTML файл
+    m.save(output_html)
+    logger.info(f"Интерактивная визуализация '{title}' сохранена в '{output_html}'.")
+
+
+def copy_selected_images_sets(selected_sets: List[List[Dict[str, Any]]], base_destination_dir: str):
     """
-    logger.info(f"Выбор {num_images} изображений с перекрытием >= {min_overlap}% и исключением по ключевому слову '{exclude_keyword}'.")
+    Копирует выбранные изображения в указанные папки для каждого сета и записывает список изображений в текстовый файл.
+
+    :param selected_sets: Список сетов с выбранными изображениями.
+    :param base_destination_dir: Базовый путь к папке назначения.
+    """
+    if not os.path.exists(base_destination_dir):
+        try:
+            os.makedirs(base_destination_dir)
+            logger.info(f"Создана базовая папка назначения: {base_destination_dir}")
+        except Exception as e:
+            logger.error(f"Ошибка при создании папки {base_destination_dir}: {e}")
+            return
+
+    for idx, image_set in enumerate(selected_sets):
+        set_dir = os.path.join(base_destination_dir, f"set_{idx+1}")
+        if not os.path.exists(set_dir):
+            try:
+                os.makedirs(set_dir)
+                logger.info(f"Создана папка для сета {idx+1}: {set_dir}")
+            except Exception as e:
+                logger.error(f"Ошибка при создании папки {set_dir}: {e}")
+                continue
+
+        image_filenames = []  # Список для хранения имен файлов изображений
+
+        for img in image_set:
+            filename = img['filename']
+            source_path = img['file_path']
+            destination_path = os.path.join(set_dir, filename)
+            try:
+                # Копируем файл без изменений
+                with open(source_path, 'rb') as src_file:
+                    with open(destination_path, 'wb') as dest_file:
+                        dest_file.write(src_file.read())
+                logger.info(f"Скопировано: {source_path} -> {destination_path}")
+                image_filenames.append(filename)
+            except Exception as e:
+                logger.error(f"Ошибка при копировании файла {filename}: {e}")
+
+        # Записываем список изображений в текстовый файл в папке сета
+        try:
+            list_file_path = os.path.join(set_dir, "image_list.txt")
+            with open(list_file_path, 'w', encoding='utf-8') as f:
+                for filename in image_filenames:
+                    f.write(f"{filename}\n")
+            logger.info(f"Список изображений для сета {idx+1} записан в файл: {list_file_path}")
+        except Exception as e:
+            logger.error(f"Ошибка при записи списка изображений для сета {idx+1}: {e}")
+
+
+def select_images_sets(
+    data_list: List[Dict[str, Any]],
+    num_sets: int,
+    num_images_per_set: int,
+    overlap_percentage_between_sets: float,
+    sort_by: str = 'relative_altitude',
+    exclude_keyword: str = ''
+) -> List[List[Dict[str, Any]]]:
+    """
+    Выбирает изображения и распределяет их по заданному количеству сетов (папок), обеспечивая
+    заданный процент одинаковых фотографий (пересечений) между всеми парами сетов и заданное количество фотографий в каждом сете.
+    """
+    logger.info(
+        f"Выбор изображений для {num_sets} сетов по {num_images_per_set} изображений в каждом сете с пересечением {overlap_percentage_between_sets}%."
+    )
 
     # Исключаем изображения с заданным ключевым словом в названии файла или пути
     exclude_keyword_lower = exclude_keyword.lower()
     filtered_data = [
         d for d in data_list
         if exclude_keyword_lower not in d['filename'].lower()
-        and exclude_keyword_lower not in d['relative_path'].lower()
+           and exclude_keyword_lower not in d['relative_path'].lower()
+           and d.get('polygon') is not None
     ]
+
     excluded_count = len(data_list) - len(filtered_data)
     if not filtered_data:
         logger.warning(f"Нет изображений после исключения ключевого слова '{exclude_keyword}'.")
@@ -655,109 +871,136 @@ def select_images(data_list: List[Dict[str, Any]], num_images: int, min_overlap:
     else:
         logger.info(f"Исключено {excluded_count} изображений по ключевому слову '{exclude_keyword}'.")
 
-    # Группируем изображения по диапазонам высот
-    altitude_ranges = {
-        '20-80': [],
-        '80-140': [],
-        '140-200': [],
-    }
+    # Расчет количества перекрывающихся и уникальных изображений
+    overlap_count = int(num_images_per_set * overlap_percentage_between_sets / 100)
+    num_pairs = num_sets * (num_sets - 1) // 2  # Количество пар сетов
+    overlaps_per_set = overlap_count * (num_sets - 1)
+    unique_images_per_set = num_images_per_set - overlaps_per_set
 
-    for data in filtered_data:
-        alt = data.get('relative_altitude', 0)
-        if alt is None:
-            continue
-        if 20 <= alt <= 80:
-            altitude_ranges['20-80'].append(data)
-        elif 80 < alt <= 140:
-            altitude_ranges['80-140'].append(data)
-        elif 140 < alt <= 200:
-            altitude_ranges['140-200'].append(data)
-
-    selected_images = []
-
-    # Вычисляем количество изображений для выбора из каждого диапазона
-    total_ranges = len([rng for rng in altitude_ranges.values() if rng])
-    if total_ranges == 0:
-        logger.warning("Нет доступных диапазонов высот для выбора изображений.")
+    if unique_images_per_set < 0:
+        logger.warning("Процент перекрытия слишком высок для заданного количества сетов и изображений в сете.")
         return []
-    images_per_range = num_images // total_ranges
 
-    for range_name, images in altitude_ranges.items():
-        if not images:
-            continue
-        # Фильтруем изображения с перекрытием >= min_overlap
-        overlapping_images = [img for img in images if img.get('overlap_percentage', 0) >= min_overlap]
-        if not overlapping_images:
-            logger.info(f"В диапазоне высот {range_name} нет изображений с перекрытием >= {min_overlap}%.")
-            continue
-        # Выбираем случайные изображения из этого диапазона
-        num_to_select = min(images_per_range, len(overlapping_images))
-        selected = random.sample(overlapping_images, num_to_select)
-        selected_images.extend(selected)
-        logger.info(f"Выбрано {num_to_select} изображений из диапазона высот {range_name}.")
+    total_overlapping_images = overlap_count * num_pairs
+    total_unique_images_needed = unique_images_per_set * num_sets + total_overlapping_images
 
-    # Если выбрано меньше изображений, чем нужно, дополняем оставшимися
-    if len(selected_images) < num_images:
-        remaining_images = [img for img in filtered_data if img not in selected_images]
-        additional_needed = num_images - len(selected_images)
-        # Фильтруем дополнительные изображения с перекрытием >= min_overlap
-        additional_overlapping = [img for img in remaining_images if img.get('overlap_percentage', 0) >= min_overlap]
-        if additional_overlapping:
-            num_additional = min(additional_needed, len(additional_overlapping))
-            additional_images = random.sample(additional_overlapping, num_additional)
-            selected_images.extend(additional_images)
-            logger.info(f"Дополнительно выбрано {num_additional} изображений с перекрытием >= {min_overlap}%.")
-        else:
-            # Если недостаточно изображений с требуемым перекрытием, выбираем оставшиеся без фильтра
-            additional_images = random.sample(remaining_images, min(additional_needed, len(remaining_images)))
-            selected_images.extend(additional_images)
-            logger.info(f"Дополнительно выбрано {len(additional_images)} изображений без учета перекрытия.")
+    if total_unique_images_needed > len(filtered_data):
+        logger.warning("Недостаточно изображений для выполнения условий с заданными параметрами.")
+        return []
 
-    # Фиксируем выбранные изображения в текстовом файле
-    with open('selected_images.txt', 'w', encoding='utf-8') as f:
-        for img in selected_images:
-            f.write(f"{img['filename']}\n")
+    # Перемешиваем данные
+    random.shuffle(filtered_data)
 
-    return selected_images
+    used_images = set()
+    unique_images_sets = [[] for _ in range(num_sets)]
+    overlapping_images = {}
 
-def copy_selected_images(selected_images: List[Dict[str, Any]], source_root: str, destination_dir: str, data_list: List[Dict[str, Any]]):
+    image_pool = filtered_data.copy()
+
+    # Формирование перекрывающихся изображений между всеми парами сетов
+    logger.info("Формирование перекрывающихся изображений между всеми парами сетов...")
+    from itertools import combinations
+
+    for (i, j) in combinations(range(num_sets), 2):
+        available_images = [img for img in image_pool if img['filename'] not in used_images]
+        if len(available_images) < overlap_count:
+            logger.warning("Недостаточно изображений для назначения перекрывающихся изображений между сетами.")
+            return []
+        selected_images = random.sample(available_images, overlap_count)
+        overlapping_images[(i, j)] = selected_images
+        used_images.update(img['filename'] for img in selected_images)
+        image_pool = [img for img in image_pool if img['filename'] not in used_images]
+
+    # Формирование уникальных изображений для каждого сета
+    logger.info("Формирование уникальных изображений для каждого сета...")
+    for i in range(num_sets):
+        available_images = [img for img in image_pool if img['filename'] not in used_images]
+        if len(available_images) < unique_images_per_set:
+            logger.warning("Недостаточно изображений для назначения уникальных изображений для каждого сета.")
+            return []
+        selected_images = random.sample(available_images, unique_images_per_set)
+        unique_images_sets[i] = selected_images
+        used_images.update(img['filename'] for img in selected_images)
+        image_pool = [img for img in image_pool if img['filename'] not in used_images]
+
+    # Сборка каждого сета
+    selected_sets = []
+    for i in range(num_sets):
+        current_set = unique_images_sets[i].copy()
+        # Добавляем перекрывающиеся изображения с другими сетами
+        for j in range(num_sets):
+            if i == j:
+                continue
+            if i < j:
+                overlap_imgs = overlapping_images.get((i, j), [])
+            else:
+                overlap_imgs = overlapping_images.get((j, i), [])
+            current_set.extend(overlap_imgs)
+        # Проверяем и удаляем возможные дубликаты (на всякий случай)
+        current_set = list({img['filename']: img for img in current_set}.values())
+        if len(current_set) != num_images_per_set:
+            logger.warning(f"Сет {i+1} не содержит корректное количество изображений.")
+            return []
+        # Сортируем текущий сет
+        current_set.sort(key=lambda x: x.get(sort_by, 0) or 0)
+        selected_sets.append(current_set)
+
+    logger.info("Формирование сетов завершено.")
+    return selected_sets
+
+
+def create_overlap_map(selected_sets: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
     """
-    Копирует выбранные изображения в указанную папку.
+    Создает карту пересечений для отобранных фотографий с подсчетом пересечений
+    внутри всех сетов и внутри каждого сета.
 
-    :param selected_images: Список выбранных изображений.
-    :param source_root: Корневой каталог с изображениями.
-    :param destination_dir: Путь к папке назначения.
-    :param data_list: Полный список данных для поиска относительных путей.
+    :param selected_sets: Список сетов с выбранными изображениями.
+    :return: Словарь с информацией о пересечениях.
     """
-    if not os.path.exists(destination_dir):
-        try:
-            os.makedirs(destination_dir)
-            logger.info(f"Создана папка назначения: {destination_dir}")
-        except Exception as e:
-            logger.error(f"Ошибка при создании папки {destination_dir}: {e}")
-            return
+    logger.info("Создание карты пересечений между сетами...")
 
-    # Создаем словарь для быстрого поиска относительного пути по имени файла
-    path_dict = {d['filename']: d['relative_path'] for d in data_list}
+    overlap_map = {}
+    total_images = set()
 
-    for img in selected_images:
-        filename = img['filename']
-        relative_path = path_dict.get(filename)
-        if not relative_path:
-            logger.warning(f"Предупреждение: Относительный путь для файла {filename} не найден. Пропуск.")
-            continue
-        source_path = os.path.join(source_root, relative_path)
-        destination_path = os.path.join(destination_dir, filename)
-        try:
-            shutil.copy2(source_path, destination_path)
-            logger.info(f"Скопировано: {source_path} -> {destination_path}")
-        except Exception as e:
-            logger.error(f"Ошибка при копировании файла {filename}: {e}")
+    # Собираем все уникальные имена файлов
+    for idx, image_set in enumerate(selected_sets):
+        set_number = idx + 1
+        image_filenames = set(img['filename'] for img in image_set)
+        total_images.update(image_filenames)
+        overlap_map[f"set_{set_number}"] = {
+            "images": list(image_filenames),  # Преобразуем set в list
+            "overlaps_within_set": {},
+            "overlaps_with_other_sets": {}
+        }
+
+    # Вычисляем пересечения внутри каждого сета (если нужно)
+    for key, value in overlap_map.items():
+        images_in_set = value['images']
+        # В данном случае, так как в каждом сете изображения уникальны после отбора, пересечений внутри сета нет
+        value['overlaps_within_set'] = 0  # Для консистентности
+
+    # Вычисляем пересечения между сетами
+    for idx1 in range(len(selected_sets)):
+        set_num1 = idx1 + 1
+        images_set1 = set(overlap_map[f"set_{set_num1}"]['images'])
+        for idx2 in range(idx1 + 1, len(selected_sets)):
+            set_num2 = idx2 + 1
+            images_set2 = set(overlap_map[f"set_{set_num2}"]['images'])
+            overlap_images = images_set1.intersection(images_set2)
+            overlap_count = len(overlap_images)
+            overlap_percentage = (overlap_count / NUM_IMAGES_PER_SET) * 100
+            logger.info(f"Пересечение между сетом {set_num1} и сетом {set_num2}: {overlap_count} изображений ({overlap_percentage:.2f}%)")
+            overlap_map[f"set_{set_num1}"]['overlaps_with_other_sets'][f"set_{set_num2}"] = overlap_count
+            overlap_map[f"set_{set_num2}"]['overlaps_with_other_sets'][f"set_{set_num1}"] = overlap_count
+
+    logger.info("Карта пересечений создана.")
+
+    return overlap_map
+
 
 def main():
     data_list = []
     hash_set = set()
-    duplicates_found = False
 
     # Собираем список всех файлов для обработки
     logger.info("Сканирование каталогов для поиска изображений...")
@@ -860,8 +1103,33 @@ def main():
     # Вычисляем перекрытие
     calculate_overlap(data_list)
 
+    # Выбор изображений и создание сетов
+    selected_sets = select_images_sets(
+        data_list,
+        num_sets=NUM_SETS_TO_CREATE,
+        num_images_per_set=NUM_IMAGES_PER_SET,
+        overlap_percentage_between_sets=OVERLAP_PERCENTAGE_BETWEEN_SETS,
+        sort_by='relative_altitude',
+        exclude_keyword=EXCLUDE_KEYWORD
+    )
+
+    if selected_sets:
+        # Копирование выбранных изображений
+        copy_selected_images_sets(selected_sets, DESTINATION_DIR)
+        logger.info(f"Избранные изображения скопированы в папку: {DESTINATION_DIR}")
+
+        # Создание карты пересечений
+        overlap_map = create_overlap_map(selected_sets)
+        # Сериализуем overlap_map в JSON
+        overlap_map_json = json.dumps(overlap_map, indent=2, ensure_ascii=False)
+        logger.info("Карта пересечений:")
+        logger.info(overlap_map_json)
+
+    else:
+        logger.info("Нет изображений для копирования.")
+
     # Визуализируем перекрытия
-    visualize_overlaps(data_list)
+    visualize_overlaps(data_list, selected_sets)
 
     # Записываем данные
     headers = [
@@ -877,20 +1145,6 @@ def main():
     # Анализ данных
     analyze_data(data_list)
 
-    # Выбор изображений
-    selected_images = select_images(
-        data_list,
-        num_images=NUM_IMAGES_TO_SELECT,
-        min_overlap=MIN_OVERLAP_PERCENT,
-        exclude_keyword=EXCLUDE_KEYWORD
-    )
-
-    if selected_images:
-        # Копирование выбранных изображений
-        copy_selected_images(selected_images, ROOT_DIR, DESTINATION_DIR, data_list)
-        logger.info(f"Избранные изображения скопированы в папку: {DESTINATION_DIR}")
-    else:
-        logger.info("Нет изображений для копирования.")
 
 if __name__ == '__main__':
     main()
