@@ -8,6 +8,7 @@ import numpy as np
 # Константы настройки
 DRAW_OVERLAY = True  # Установите в True, чтобы создать изображение с наложенными разметками
 OVERLAY_ANNOTATIONS = 'all'  # 'all' для всех разметок или список индексов для выборочной разметки
+BOX_THICKNESS = 1  # Толщина рамок bounding boxes
 
 logging.basicConfig(level=logging.INFO)
 
@@ -56,13 +57,21 @@ def draw_bounding_boxes(image_path, annotation_paths, output_dir):
         return
 
     height, width = image.shape[:2]
-    colors = cycle([(255, 0, 0), (0, 255, 0), (0, 0, 255),
-                   (255, 255, 0), (0, 255, 255), (255, 0, 255)])
+    colors = cycle([
+        (255, 0, 0),      # Красный
+        (0, 255, 0),      # Зеленый
+        (0, 0, 255),      # Синий
+        (255, 255, 0),    # Голубой
+        (0, 255, 255),    # Бирюзовый
+        (255, 0, 255)     # Магента
+    ])
 
     # Создание копии для наложения разметок всех аннотаций
     if DRAW_OVERLAY:
         overlay_image = image.copy()
-        overlay_colors = cycle([(0, 0, 0)])  # Чёрный для текста или общего фона, можно изменить при необходимости
+        overlay_colors = cycle([
+            (0, 0, 0)  # Чёрный для текста или общего фона, можно изменить при необходимости
+        ])
 
     for idx, ann_path in enumerate(annotation_paths):
         img_copy = image.copy()
@@ -74,15 +83,15 @@ def draw_bounding_boxes(image_path, annotation_paths, output_dir):
             box_width, box_height = w * width, h * height
             x1, y1 = int(x_center - box_width / 2), int(y_center - box_height / 2)
             x2, y2 = int(x_center + box_width / 2), int(y_center + box_height / 2)
-            cv2.rectangle(img_copy, (x1, y1), (x2, y2), color, 2)
-            # Optionally, you can add labels on top of the boxes
-            # cv2.putText(img_copy, str(label), (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            cv2.rectangle(img_copy, (x1, y1), (x2, y2), color, BOX_THICKNESS)
+            # Опционально, можно добавить метки на боксы
+            # cv2.putText(img_copy, str(label), (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, BOX_THICKNESS)
 
             # Если требуется наложение, добавляем в overlay_image
             if DRAW_OVERLAY and (OVERLAY_ANNOTATIONS == 'all' or idx in OVERLAY_ANNOTATIONS):
-                cv2.rectangle(overlay_image, (x1, y1), (x2, y2), color, 2)
+                cv2.rectangle(overlay_image, (x1, y1), (x2, y2), color, BOX_THICKNESS)
                 # Можно добавить лейблы тоже, если нужно
-                # cv2.putText(overlay_image, str(label), (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                # cv2.putText(overlay_image, str(label), (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, BOX_THICKNESS)
 
         basename = os.path.basename(ann_path).split('.')[0]
         output_path = os.path.join(output_dir, f"{basename}_bbox.jpg")
@@ -217,7 +226,14 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     annotation_paths = [ground_truth_path] + other_annotation_paths
     draw_bounding_boxes(image_path, annotation_paths, output_dir)
-    compare_annotations(ground_truth_path, other_annotation_paths, image_path, threshold_iou=0.5, threshold_center=1, threshold_size=1)
+    compare_annotations(
+        ground_truth_path,
+        other_annotation_paths,
+        image_path,
+        threshold_iou=0.5,
+        threshold_center=1,
+        threshold_size=1
+    )
 
 
 if __name__ == '__main__':
