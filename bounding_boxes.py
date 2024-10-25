@@ -5,6 +5,10 @@ from shapely.geometry import box
 from itertools import cycle
 import numpy as np
 
+# Константы настройки
+DRAW_OVERLAY = True  # Установите в True, чтобы создать изображение с наложенными разметками
+OVERLAY_ANNOTATIONS = 'all'  # 'all' для всех разметок или список индексов для выборочной разметки
+
 logging.basicConfig(level=logging.INFO)
 
 def read_annotations(annotation_path):
@@ -43,6 +47,8 @@ def save_image_with_bounding_boxes(img_copy, output_path):
 def draw_bounding_boxes(image_path, annotation_paths, output_dir):
     """
     Рисует bounding boxes на изображении на основе аннотаций.
+    Создаёт отдельные изображения для каждой аннотации.
+    Дополнительно, если DRAW_OVERLAY=True, создаёт изображение с наложенными разметками всех аннотаций.
     """
     image = cv2.imread(image_path)
     if image is None:
@@ -50,7 +56,13 @@ def draw_bounding_boxes(image_path, annotation_paths, output_dir):
         return
 
     height, width = image.shape[:2]
-    colors = cycle([(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (0, 255, 255), (255, 0, 255)])
+    colors = cycle([(255, 0, 0), (0, 255, 0), (0, 0, 255),
+                   (255, 255, 0), (0, 255, 255), (255, 0, 255)])
+
+    # Создание копии для наложения разметок всех аннотаций
+    if DRAW_OVERLAY:
+        overlay_image = image.copy()
+        overlay_colors = cycle([(0, 0, 0)])  # Чёрный для текста или общего фона, можно изменить при необходимости
 
     for idx, ann_path in enumerate(annotation_paths):
         img_copy = image.copy()
@@ -63,12 +75,25 @@ def draw_bounding_boxes(image_path, annotation_paths, output_dir):
             x1, y1 = int(x_center - box_width / 2), int(y_center - box_height / 2)
             x2, y2 = int(x_center + box_width / 2), int(y_center + box_height / 2)
             cv2.rectangle(img_copy, (x1, y1), (x2, y2), color, 2)
+            # Optionally, you can add labels on top of the boxes
             # cv2.putText(img_copy, str(label), (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+            # Если требуется наложение, добавляем в overlay_image
+            if DRAW_OVERLAY and (OVERLAY_ANNOTATIONS == 'all' or idx in OVERLAY_ANNOTATIONS):
+                cv2.rectangle(overlay_image, (x1, y1), (x2, y2), color, 2)
+                # Можно добавить лейблы тоже, если нужно
+                # cv2.putText(overlay_image, str(label), (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
         basename = os.path.basename(ann_path).split('.')[0]
         output_path = os.path.join(output_dir, f"{basename}_bbox.jpg")
         save_image_with_bounding_boxes(img_copy, output_path)
         logging.info(f"Сохранено изображение с bounding boxes в '{output_path}'")
+
+    # Сохранение наложенного изображения, если требуется
+    if DRAW_OVERLAY:
+        overlay_output_path = os.path.join(output_dir, "overlay_bbox.jpg")
+        save_image_with_bounding_boxes(overlay_image, overlay_output_path)
+        logging.info(f"Сохранено изображение с наложенными bounding boxes в '{overlay_output_path}'")
 
 
 def calculate_iou(box1, box2):
@@ -186,7 +211,7 @@ def compare_annotations(ground_truth_path, other_annotation_paths, image_path, t
 def main():
     image_path = r'C:\Users\mkolp\Downloads\photo_2024-10-25_09-52-57.jpg'
     ground_truth_path = r'C:\Users\mkolp\Downloads\результат.txt'
-    other_annotation_paths = [r'C:\Users\mkolp\Downloads\01_1_000001.txt']
+    other_annotation_paths = [r'C:\Users\mkolp\Downloads\Карина.txt']
     output_dir = r'C:\Users\mkolp\Downloads\output_images'
 
     os.makedirs(output_dir, exist_ok=True)
