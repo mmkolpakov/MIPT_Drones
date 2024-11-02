@@ -270,7 +270,7 @@ def cut_with_annotation(annotated_image: AnnotatedImageData, cut_set: Tuple[int,
         new_filename = f"{base_filename}_part_{x1}_{y1}{IMAGE_FORMAT}"
     elif NAMING_METHOD == NamingMethod.NUMERICAL:
         # Способ именования с использованием простой нумерации
-        new_filename = f"{base_filename}_part_{split_idx}{IMAGE_FORMAT}"
+        new_filename = f"{base_filename}_{split_idx}{IMAGE_FORMAT}"
     else:
         logging.error(f"Неизвестный способ именования: {NAMING_METHOD}")
         raise ValueError(f"Неизвестный способ именования: {NAMING_METHOD}")
