@@ -8,6 +8,7 @@ import numpy as np
 import csv
 from collections import defaultdict
 import re
+from enum import Enum
 
 # --------------------------- Константы ---------------------------
 
@@ -42,6 +43,13 @@ LOG_CSV_PATH = OUTPUT_DIR / "process_log.csv"
 
 # Путь к файлу для сравнения аннотаций
 DELTA_PIXELS_CSV = OUTPUT_DIR / "delta_pixels.csv"
+
+class NamingMethod(Enum):
+    COORDINATES = 1
+    NUMERICAL = 2
+
+# Способ именования: NamingMethod.COORDINATES или NamingMethod.NUMERICAL
+NAMING_METHOD = NamingMethod.NUMERICAL
 
 # -----------------------------------------------------------------
 
@@ -252,11 +260,21 @@ def cut_with_annotation(annotated_image: AnnotatedImageData, cut_set: Tuple[int,
     cropped_image = annotated_image.data[y1:y2, x1:x2]
     cropped_height, cropped_width = cropped_image.shape[:2]
 
-    # Генерация нового имени файла на основе имени изображения без суффикса '_part_*'
+    # Генерация нового имени файла на основе выбранного способа именования
     base_filename = Path(annotated_image.image_path).stem if annotated_image.image_path else 'image'
     # Удаляем любой существующий суффикс '_part_*'
     base_filename = re.sub(r'_part_\d+_\d+$', '', base_filename)
-    new_filename = f"{base_filename}_part_{x1}_{y1}{IMAGE_FORMAT}"
+
+    if NAMING_METHOD == NamingMethod.COORDINATES:
+        # Способ именования с использованием координат
+        new_filename = f"{base_filename}_part_{x1}_{y1}{IMAGE_FORMAT}"
+    elif NAMING_METHOD == NamingMethod.NUMERICAL:
+        # Способ именования с использованием простой нумерации
+        new_filename = f"{base_filename}_part_{split_idx}{IMAGE_FORMAT}"
+    else:
+        logging.error(f"Неизвестный способ именования: {NAMING_METHOD}")
+        raise ValueError(f"Неизвестный способ именования: {NAMING_METHOD}")
+
     # Сохраняем в той же директории, что и исходная картинка
     new_image_path = annotated_image.image_path.parent / new_filename if annotated_image.image_path else Path(new_filename)
 
@@ -265,7 +283,6 @@ def cut_with_annotation(annotated_image: AnnotatedImageData, cut_set: Tuple[int,
         new_annotation_root = ET.Element("annotation")
 
         # Копирование всех необходимых элементов из исходной аннотации
-        # Исключаем только те, которые нужно изменить (filename, size, object)
         for child in annotated_image.annotation:
             if child.tag == "filename":
                 ET.SubElement(new_annotation_root, "filename").text = new_filename
