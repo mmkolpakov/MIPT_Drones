@@ -171,6 +171,8 @@ def calculate_split_coordinates(
 
             coords.append((int(x1), int(y1), int(x2), int(y2)))
 
+    print("sub_width", sub_width, "sub_height", sub_height)
+    print("coords are:", coords)
     return coords
 
 
