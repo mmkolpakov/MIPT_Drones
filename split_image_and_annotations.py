@@ -14,16 +14,16 @@ from enum import Enum
 
 # Путь к директории с исходными данными (изображениями и аннотациями)
 # NOTE поставил свои пути
-INPUT_DIR = Path(r"C:\Users\mkolp\OneDrive\Изображения\test")
+INPUT_DIR = Path(r"C:\Users\mkolp\OneDrive\Изображения\test2")
 
 # Путь к директории для сохранения результатов
 # NOTE поставил свои пути
-OUTPUT_DIR = Path(r"C:\Users\mkolp\OneDrive\Изображения\test\results")
+OUTPUT_DIR = Path(r"C:\Users\mkolp\OneDrive\Изображения\test2\results")
 
 # Параметры разделения изображения
 SPLIT_HORIZONTAL = 2  # Количество разбиений по горизонтали
 SPLIT_VERTICAL = 2    # Количество разбиений по вертикали
-OVERLAP = 0.4 # перекрытие двух соседних частей [долей от исходного]
+OVERLAP = 0.4652014652014 # перекрытие двух соседних частей [долей от исходного]
 
 # Форматы сохраняемых изображений
 SUPPORTED_IMAGE_FORMATS = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
@@ -128,24 +128,48 @@ def calculate_split_coordinates(
     split_v: int,
     overlap: float
 ) -> List[Tuple[int, int, int, int]]:
+    """
+    Вычисляет координаты для разбиения изображения на сетку.
+
+    :param width: Ширина изображения.
+    :param height: Высота изображения.
+    :param split_h: Количество разбиений по горизонтали.
+    :param split_v: Количество разбиений по вертикали.
+    :param overlap: Размер перекрытия соседних разрезов в долях от исходного изображения (от 0 до 1).
+    :return: Список кортежей с координатами (x1, y1, x2, y2) для каждого участка.
+    """
+    if not (0 <= overlap < 1):
+        raise ValueError("Overlap must be between 0 and 1.")
+    if split_h <= 0 or split_v <= 0:
+        raise ValueError("split_h and split_v must be greater than 0.")
+
+    their_size_width = (1. + overlap * (split_h - 1)) / split_h
+    their_size_height = (1. + overlap * (split_v - 1)) / split_v
+    assert 1. > their_size_width > 0.
+    assert 1. > their_size_height > 0.
+
     coords = []
-    sub_width = int(width / (split_h - (split_h - 1) * overlap))
-    sub_height = int(height / (split_v - (split_v - 1) * overlap))
-    step_x = int(sub_width * (1 - overlap))
-    step_y = int(sub_height * (1 - overlap))
+    sub_width = round(width * their_size_width)
+    sub_height = round(height * their_size_height)
+    step_x = round(width * (their_size_width - overlap))
+    step_y = round(height * (their_size_height - overlap))
 
     for i in range(split_v):
         for j in range(split_h):
-            x1 = int(j * step_x)
-            y1 = int(i * step_y)
+            x1 = j * step_x
+            y1 = i * step_y
             x2 = x1 + sub_width
             y2 = y1 + sub_height
 
-            # Корректируем координаты, чтобы не выходили за границы изображения
-            x2 = min(x2, width)
-            y2 = min(y2, height)
+            # Корректировка, чтобы не выйти за пределы изображения
+            if x2 > width:
+                x2 = width
+                x1 = width - sub_width
+            if y2 > height:
+                y2 = height
+                y1 = height - sub_height
 
-            coords.append((x1, y1, x2, y2))
+            coords.append((int(x1), int(y1), int(x2), int(y2)))
 
     return coords
 
