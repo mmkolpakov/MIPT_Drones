@@ -14,11 +14,11 @@ from enum import Enum
 
 # Путь к директории с исходными данными (изображениями и аннотациями)
 # NOTE поставил свои пути
-INPUT_DIR = Path(r"C:\Users\mkolp\OneDrive\Изображения\test2")
+INPUT_DIR = Path(r"C:\Users\mkolp\OneDrive\Изображения\test")
 
 # Путь к директории для сохранения результатов
 # NOTE поставил свои пути
-OUTPUT_DIR = Path(r"C:\Users\mkolp\OneDrive\Изображения\test2\results")
+OUTPUT_DIR = Path(r"C:\Users\mkolp\OneDrive\Изображения\test\results")
 
 # Параметры разделения изображения
 SPLIT_HORIZONTAL = 2  # Количество разбиений по горизонтали
@@ -143,35 +143,45 @@ def calculate_split_coordinates(
     if split_h <= 0 or split_v <= 0:
         raise ValueError("split_h and split_v must be greater than 0.")
 
-    their_size_width = (1. + overlap * (split_h - 1)) / split_h
-    their_size_height = (1. + overlap * (split_v - 1)) / split_v
-    assert 1. > their_size_width > 0.
-    assert 1. > their_size_height > 0.
+    # Вычисление перекрытия в пикселях
+    overlap_pixels_x = overlap * width
+    overlap_pixels_y = overlap * height
+
+    # Вычисление размеров подизображений
+    sub_width = (width + (split_h - 1) * overlap_pixels_x) / split_h
+    sub_height = (height + (split_v - 1) * overlap_pixels_y) / split_v
+
+    # Вычисление шагов смещения
+    step_x = sub_width - overlap_pixels_x
+    step_y = sub_height - overlap_pixels_y
 
     coords = []
-    sub_width = round(width * their_size_width)
-    sub_height = round(height * their_size_height)
-    step_x = round(width * (their_size_width - overlap))
-    step_y = round(height * (their_size_height - overlap))
 
     for i in range(split_v):
         for j in range(split_h):
-            x1 = j * step_x
-            y1 = i * step_y
-            x2 = x1 + sub_width
-            y2 = y1 + sub_height
+            x1 = int(round(j * step_x))
+            y1 = int(round(i * step_y))
+            x2 = int(round(x1 + sub_width))
+            y2 = int(round(y1 + sub_height))
 
             # Корректировка, чтобы не выйти за пределы изображения
             if x2 > width:
                 x2 = width
-                x1 = width - sub_width
+                x1 = width - int(round(sub_width))
             if y2 > height:
                 y2 = height
-                y1 = height - sub_height
+                y1 = height - int(round(sub_height))
 
-            coords.append((int(x1), int(y1), int(x2), int(y2)))
+            coords.append((x1, y1, x2, y2))
 
-    print("sub_width", sub_width, "sub_height", sub_height)
+    # Проверка и коррекция координат для одинаковых размеров
+    final_sub_width = coords[0][2] - coords[0][0]
+    final_sub_height = coords[0][3] - coords[0][1]
+    for coord in coords:
+        if (coord[2] - coord[0] != final_sub_width) or (coord[3] - coord[1] != final_sub_height):
+            raise ValueError("Разрезы имеют разные размеры, проверьте параметры разреза и перекрытия.")
+
+    print("sub_width", final_sub_width, "sub_height", final_sub_height)
     print("coords are:", coords)
     return coords
 
