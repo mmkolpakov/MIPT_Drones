@@ -511,7 +511,7 @@ def verify(annotated_image: AnnotatedImageData, cut_set: Tuple[int, int, int, in
 
 def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageData, Path, int, int]]:
     """
-    Разделяет изображение и аннотации на 2x2 сетку.
+    Разделяет изображение и аннотации на сетку с заданными параметрами, корректируя разрезы для сохранения размеров и позиций.
 
     :param annotated_image: Объект AnnotatedImageData с исходными данными.
     :return: Список кортежей из AnnotatedImageData с вырезанными частями, пути к новым изображениям и позиций (x1, y1).
@@ -522,7 +522,7 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
         annotated_image.image_size_y,
         SPLIT_HORIZONTAL,
         SPLIT_VERTICAL,
-        OVERLAP # NOTE перекрытие
+        OVERLAP  # перекрытие
     )
     total_parts = len(split_coords_list)
     logging.info(f"Разделение изображения на {total_parts} частей.")
@@ -533,14 +533,6 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
 
     image_result = []  # список вырезанных изображений и их позиций
 
-    # Возможные направления сдвига для каждой части (право-вниз, влево-вниз, право-вверх, влево-вверх)
-    directions = [
-        (step, step),    # часть 1: вправо и вниз
-        (-step, step),   # часть 2: влево и вниз
-        (step, -step),   # часть 3: вправо и вверх
-        (-step, -step)   # часть 4: влево и вверх
-    ]
-
     for idx, base_split in enumerate(split_coords_list, start=1):
         logging.info(f"Обработка части {idx} из {total_parts} (Координаты: {base_split})...")
         a_base, b_base, c_base, d_base = base_split
@@ -548,19 +540,18 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
         best_cut = base_split
         best_min_percent = 0.0
         best_N = float('inf')
-        best_axis = (False, False)
+        best_axis = (True, True)  # По умолчанию смещаем по обеим осям
         done = False
-        results_cut: Dict[Tuple[int, int, int, int], Tuple[int, float, Tuple[bool, bool]]] = {}
 
         for attempt in range(nstep):
             if attempt == 0:
                 da, dc = 0, 0
             else:
                 # Используем best_axis для определения направлений смещения
-                da = step * attempt if best_axis[0] else 0
-                dc = step * attempt if best_axis[1] else 0
+                da = -step * attempt if best_axis[0] else 0
+                dc = -step * attempt if best_axis[1] else 0
 
-            # Смещение разреза только по необходимым осям
+            # Смещение разреза по необходимым осям
             current_split = (
                 a_base + da,
                 b_base + dc,
@@ -568,15 +559,45 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
                 d_base + dc
             )
 
-            # Проверяем границы, чтобы не выйти за пределы изображения
-            current_split = (
-                max(current_split[0], 0),
-                max(current_split[1], 0),
-                min(current_split[2], annotated_image.image_size_x),
-                min(current_split[3], annotated_image.image_size_y)
-            )
+            # Вычисляем размеры разреза
+            split_width = current_split[2] - current_split[0]
+            split_height = current_split[3] - current_split[1]
+
+            # Корректируем координаты, чтобы разрез полностью помещался в изображение
+            if current_split[0] < 0:
+                current_split = (
+                    0,
+                    current_split[1],
+                    split_width,
+                    current_split[3]
+                )
+            if current_split[2] > annotated_image.image_size_x:
+                current_split = (
+                    annotated_image.image_size_x - split_width,
+                    current_split[1],
+                    annotated_image.image_size_x,
+                    current_split[3]
+                )
+            if current_split[1] < 0:
+                current_split = (
+                    current_split[0],
+                    0,
+                    current_split[2],
+                    split_height
+                )
+            if current_split[3] > annotated_image.image_size_y:
+                current_split = (
+                    current_split[0],
+                    annotated_image.image_size_y - split_height,
+                    current_split[2],
+                    annotated_image.image_size_y
+                )
 
             # Проверяем, что разрез корректен
+            if current_split[0] < 0 or current_split[1] < 0 or current_split[2] > annotated_image.image_size_x or current_split[3] > annotated_image.image_size_y:
+                logging.debug(f"Попытка {attempt + 1}: разрез выходит за пределы изображения {current_split}. Пропуск.")
+                continue
+
             if current_split[0] >= current_split[2] or current_split[1] >= current_split[3]:
                 logging.debug(f"Попытка {attempt + 1}: некорректный разрез {current_split}. Пропуск.")
                 continue
@@ -591,15 +612,14 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
                 logging.debug("Идеальный разрез найден.")
                 break
             else:
-                results_cut[current_split] = (N, min_percent, axis)
-                if min_percent > best_min_percent:
+                if min_percent > best_min_percent or (min_percent == best_min_percent and N < best_N):
                     best_min_percent = min_percent
                     best_cut = current_split
                     best_N = N
                     best_axis = axis
 
         if not done:
-            logging.info(f"Идеальный разрез не найден для части {idx}. Выбирается наилучший из худших вариантов.")
+            logging.info(f"Идеальный разрез не найден для части {idx}. Выбирается наилучший доступный вариант.")
 
         # Вырезаем изображение и аннотации по выбранному разрезу
         split_image_data, split_image_path, split_x, split_y = cut_with_annotation(annotated_image, best_cut, idx)
