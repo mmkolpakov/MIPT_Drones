@@ -1,3 +1,5 @@
+import math
+
 import cv2
 import xml.etree.ElementTree as ET
 import logging
@@ -147,9 +149,9 @@ def calculate_split_coordinates(
     overlap_pixels_x = overlap * width
     overlap_pixels_y = overlap * height
 
-    # Вычисление размеров подизображений
-    sub_width = (width + (split_h - 1) * overlap_pixels_x) / split_h
-    sub_height = (height + (split_v - 1) * overlap_pixels_y) / split_v
+    # Вычисление размеров подизображений с округлением вниз
+    sub_width = math.floor((width + (split_h - 1) * overlap_pixels_x) / split_h)
+    sub_height = math.floor((height + (split_v - 1) * overlap_pixels_y) / split_v)
 
     # Вычисление шагов смещения
     step_x = sub_width - overlap_pixels_x
@@ -159,20 +161,20 @@ def calculate_split_coordinates(
 
     for i in range(split_v):
         for j in range(split_h):
-            x1 = int(round(j * step_x))
-            y1 = int(round(i * step_y))
-            x2 = int(round(x1 + sub_width))
-            y2 = int(round(y1 + sub_height))
+            x1 = int(math.floor(j * step_x))
+            y1 = int(math.floor(i * step_y))
+            x2 = x1 + sub_width
+            y2 = y1 + sub_height
 
             # Корректировка, чтобы не выйти за пределы изображения
             if x2 > width:
                 x2 = width
-                x1 = width - int(round(sub_width))
+                x1 = width - sub_width
             if y2 > height:
                 y2 = height
-                y1 = height - int(round(sub_height))
+                y1 = height - sub_height
 
-            coords.append((x1, y1, x2, y2))
+            coords.append((int(x1), int(y1), int(x2), int(y2)))
 
     # Проверка и коррекция координат для одинаковых размеров
     final_sub_width = coords[0][2] - coords[0][0]
