@@ -3,35 +3,27 @@ import os
 import logging
 import numpy as np
 import xml.etree.ElementTree as ET
+from PIL import Image
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 # ===== Константы для параметров программы =====
 
-# Путь к изображению
-IMAGE_PATH = r'C:\Users\mkolp\Downloads\DJI_020240907173008.jpg'
+# Директория с изображениями и их аннотациями
+IMAGE_DIR = r'C:\Users\mkolp\OneDrive\Документы\5_course\Батчи_разметка\Батчи\batch_007'
 
-# Путь к файлу с эталонными аннотациями
-GROUND_TRUTH_PATH = r'C:\Users\mkolp\Downloads\DJI_020240907173008.xml'
+# Директория с эталонными аннотациями
+GROUND_TRUTH_DIR = r'C:\Users\mkolp\Downloads\Telegram Desktop\batch_007_k'
 
 # Формат эталонной аннотации ('txt' или 'xml')
-GROUND_TRUTH_FORMAT = 'xml'
+GROUND_TRUTH_FORMAT = 'txt'  # Или 'xml', в зависимости от формата ваших аннотаций
 
-# Список путей к другим файлам аннотаций
-OTHER_ANNOTATION_PATHS = [
-    r'C:\Users\mkolp\Downloads\Карина.xml',
-    # Добавьте другие пути к файлам аннотаций при необходимости
-]
-
-# Список форматов аннотаций для других файлов ('txt' или 'xml')
-OTHER_ANNOTATION_FORMATS = [
-    'xml',  # Формат для 'Карина.xml'
-    # Укажите форматы для других аннотаций в том же порядке, что и пути
-]
+# Формат аннотаций в директории с изображениями ('txt' или 'xml')
+ANNOTATION_FORMAT = 'txt'  # Или 'xml', в зависимости от формата ваших аннотаций
 
 # Директория для сохранения результатов
-OUTPUT_DIR = r'C:\Users\mkolp\Downloads\test.xml'
+OUTPUT_DIR = r'C:\Users\mkolp\Downloads\output'
 
 # Порог IoU для соответствия боксов
 THRESHOLD_IOU = 0.5
@@ -50,16 +42,29 @@ OVERLAY_ANNOTATIONS = 'all'
 
 # ===== Функции программы =====
 
+def read_image(image_path):
+    """
+    Читает изображение с поддержкой путей с нелатинскими символами.
+    """
+    try:
+        with Image.open(image_path) as img:
+            image = img.convert('RGB')
+            return np.array(image)
+    except Exception as e:
+        logging.error(f"Не удалось загрузить изображение '{image_path}': {e}")
+        return None
+
 def save_image(img, output_path):
     """
     Сохраняет изображение с поддержкой путей с нелатинскими символами.
     """
-    success, encoded_image = cv2.imencode('.jpg', img)
-    if success:
-        with open(output_path, 'wb') as f:
-            f.write(encoded_image)
-    else:
-        logging.error(f"Не удалось сохранить изображение '{output_path}'")
+    try:
+        # Конвертируем изображение из BGR в RGB
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        image_pil = Image.fromarray(img_rgb)
+        image_pil.save(output_path)
+    except Exception as e:
+        logging.error(f"Не удалось сохранить изображение '{output_path}': {e}")
 
 def normalize_box(box, img_width, img_height):
     """
@@ -159,10 +164,12 @@ def draw_bounding_boxes(image_path, annotation_paths, annotation_formats, output
     Создает отдельные изображения для каждой аннотации.
     Если draw_overlay=True, создает изображение с наложенными разметками всех аннотаций.
     """
-    image = cv2.imread(image_path)
+    image = read_image(image_path)
     if image is None:
         logging.error(f"Не удалось загрузить изображение '{image_path}'")
         return
+    # Конвертируем изображение из RGB в BGR для OpenCV
+    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
     height, width = image.shape[:2]
     if width == 0 or height == 0:
         logging.error("Ширина или высота изображения равны нулю.")
@@ -186,7 +193,8 @@ def draw_bounding_boxes(image_path, annotation_paths, annotation_formats, output
         if not boxes:
             continue
         color = color_palette[idx % len(color_palette)]
-        colors[os.path.basename(ann_path)] = color
+        ann_name = os.path.basename(ann_path)
+        colors[ann_name] = color
         for box in boxes:
             label, xc_norm, yc_norm, w_norm, h_norm = box
             label, xc, yc, w_box, h_box = denormalize_box(box, width, height)
@@ -199,8 +207,10 @@ def draw_bounding_boxes(image_path, annotation_paths, annotation_formats, output
             if draw_overlay and (overlay_annotations == 'all' or ann_path in overlay_annotations):
                 cv2.rectangle(overlay_image, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(overlay_image, str(label), (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
-        basename = os.path.basename(ann_path).split('.')[0]
-        output_path = os.path.join(output_dir, f"{basename}_bbox.jpg")
+        image_basename = os.path.basename(image_path).split('.')[0]
+        ann_basename = os.path.basename(ann_path).split('.')[0]
+        output_filename = f"{image_basename}_{ann_basename}_bbox.jpg"
+        output_path = os.path.join(output_dir, output_filename)
         save_image(img_copy, output_path)
         logging.info(f"Сохранено изображение с bounding boxes в '{output_path}'")
     if draw_overlay:
@@ -212,7 +222,8 @@ def draw_bounding_boxes(image_path, annotation_paths, annotation_formats, output
         for idx, (name, color) in enumerate(colors.items()):
             cv2.rectangle(overlay_image_with_legend, (10, height + idx * 25 + 5), (30, height + idx * 25 + 20), color, -1)
             cv2.putText(overlay_image_with_legend, name, (40, height + idx * 25 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-        overlay_output_path = os.path.join(output_dir, "overlay_bbox.jpg")
+        overlay_output_filename = f"{os.path.basename(image_path).split('.')[0]}_overlay_bbox.jpg"
+        overlay_output_path = os.path.join(output_dir, overlay_output_filename)
         save_image(overlay_image_with_legend, overlay_output_path)
         logging.info(f"Сохранено изображение с наложенными bounding boxes в '{overlay_output_path}'")
 
@@ -234,153 +245,192 @@ def calculate_iou(box1_coords, box2_coords):
     iou = intersection_area / float(box1_area + box2_area - intersection_area)
     return iou
 
-def compare_annotations(ground_truth_path, ground_truth_format, other_annotation_paths, annotation_formats,
-                        image_path, threshold_iou=0.5, threshold_center=5, threshold_size=5):
+def compare_annotations(ground_truth_boxes, ann_boxes, image_shape, threshold_iou=0.5, threshold_center=5, threshold_size=5):
     """
-    Сравнивает главную аннотацию с другими и выводит отличия.
+    Сравнивает эталонную аннотацию с другой и возвращает отличия.
     """
-    image = cv2.imread(image_path)
-    if image is None:
-        logging.error(f"Не удалось загрузить изображение '{image_path}'")
-        return
-    height, width = image.shape[:2]
+    height, width = image_shape[:2]
     if width == 0 or height == 0:
         logging.error("Ширина или высота изображения равны нулю.")
-        return
-    # Читаем аннотации ground truth
-    ground_truth_boxes = read_annotation(ground_truth_path, img_width=width, img_height=height, fmt=ground_truth_format)
-    if not ground_truth_boxes:
-        logging.error(f"Не удалось прочитать аннотации из '{ground_truth_path}'")
-        return
-    for idx, ann_path in enumerate(other_annotation_paths):
-        fmt = annotation_formats[idx] if annotation_formats else 'txt'
-        ann_boxes = read_annotation(ann_path, img_width=width, img_height=height, fmt=fmt)
-        if not ann_boxes:
-            logging.warning(f"Не удалось прочитать аннотации из '{ann_path}'")
-            continue
-        if len(ground_truth_boxes) == 0 or len(ann_boxes) == 0:
-            logging.info("Нет боксов для сравнения.")
-            continue
-        matched_gt_indices = set()
-        matched_ann_indices = set()
-        iou_matrix = np.zeros((len(ground_truth_boxes), len(ann_boxes)))
-        # Построение матрицы IoU
-        for i, b1 in enumerate(ground_truth_boxes):
-            label1, xc1_norm, yc1_norm, w1_norm, h1_norm = b1
-            _, xc1, yc1, w1, h1 = denormalize_box(b1, width, height)
-            x1_min, x1_max = xc1 - w1 / 2, xc1 + w1 / 2
-            y1_min, y1_max = yc1 - h1 / 2, yc1 + h1 / 2
-            for j, b2 in enumerate(ann_boxes):
-                label2, xc2_norm, yc2_norm, w2_norm, h2_norm = b2
-                _, xc2, yc2, w2, h2 = denormalize_box(b2, width, height)
-                x2_min, x2_max = xc2 - w2 / 2, xc2 + w2 / 2
-                y2_min, y2_max = yc2 - h2 / 2, yc2 + h2 / 2
-                iou = calculate_iou([x1_min, y1_min, x1_max, y1_max], [x2_min, y2_min, x2_max, y2_max])
-                iou_matrix[i, j] = iou
-        # Жадный алгоритм сопоставления боксов
-        box_differences = []
-        while True:
-            max_iou = np.max(iou_matrix)
-            if max_iou < threshold_iou:
-                break
-            max_idx = np.unravel_index(np.argmax(iou_matrix), iou_matrix.shape)
-            i, j = max_idx
-            matched_gt_indices.add(i)
-            matched_ann_indices.add(j)
-            b1 = ground_truth_boxes[i]
-            b2 = ann_boxes[j]
-            label1, xc1_norm, yc1_norm, w1_norm, h1_norm = b1
+        return [], set(), set()
+    if not ground_truth_boxes or not ann_boxes:
+        return [], set(), set()
+    matched_gt_indices = set()
+    matched_ann_indices = set()
+    iou_matrix = np.zeros((len(ground_truth_boxes), len(ann_boxes)))
+    # Построение матрицы IoU
+    for i, b1 in enumerate(ground_truth_boxes):
+        label1, xc1_norm, yc1_norm, w1_norm, h1_norm = b1
+        _, xc1, yc1, w1, h1 = denormalize_box(b1, width, height)
+        x1_min, x1_max = xc1 - w1 / 2, xc1 + w1 / 2
+        y1_min, y1_max = yc1 - h1 / 2, yc1 + h1 / 2
+        for j, b2 in enumerate(ann_boxes):
             label2, xc2_norm, yc2_norm, w2_norm, h2_norm = b2
-            _, xc1, yc1, w1, h1 = denormalize_box(b1, width, height)
             _, xc2, yc2, w2, h2 = denormalize_box(b2, width, height)
-            center_diff = np.sqrt((xc1 - xc2) ** 2 + (yc1 - yc2) ** 2)
-            size_diff_w = abs(w1 - w2)
-            size_diff_h = abs(h1 - h2)
-            significant_difference = center_diff > threshold_center or size_diff_w > threshold_size or size_diff_h > threshold_size
-            box_differences.append({
-                'gt_index': i,
-                'ann_index': j,
-                'label_gt': label1,
-                'label_ann': label2,
-                'center_diff': center_diff,
-                'size_diff_w': size_diff_w,
-                'size_diff_h': size_diff_h,
-                'iou': max_iou,
-                'significant': significant_difference
-            })
-            iou_matrix[i, :] = -1
-            iou_matrix[:, j] = -1
-        # Вывод подробной информации
-        logging.info(f"\nОтличия между '{os.path.basename(ground_truth_path)}' и '{os.path.basename(ann_path)}':")
-        if not box_differences:
-            logging.info("Нет совпадающих боксов с порогом IoU.")
-        for diff in box_differences:
-            i = diff['gt_index']
-            j = diff['ann_index']
-            logging.info(f"Бокс {i} (метка '{diff['label_gt']}') из главной аннотации и бокс {j} (метка '{diff['label_ann']}') из '{os.path.basename(ann_path)}':")
-            logging.info(f"  Смещение центров: {diff['center_diff']:.2f} пикселей")
-            logging.info(f"  Разница в ширине: {diff['size_diff_w']:.2f} пикселей")
-            logging.info(f"  Разница в высоте: {diff['size_diff_h']:.2f} пикселей")
-            logging.info(f"  IoU: {diff['iou']:.4f}")
-            if diff['significant']:
-                logging.info("  → Значимые отличия по порогам")
-            else:
-                logging.info("  → Незначительные отличия по порогам")
-        unmatched_gt_indices = set(range(len(ground_truth_boxes))) - matched_gt_indices
-        unmatched_ann_indices = set(range(len(ann_boxes))) - matched_ann_indices
-        if unmatched_gt_indices:
-            for idx in unmatched_gt_indices:
-                label = ground_truth_boxes[idx][0]
-                logging.info(f"Бокс {idx} (метка '{label}') из главной аннотации не имеет соответствия в '{os.path.basename(ann_path)}'")
-        if unmatched_ann_indices:
-            for idx in unmatched_ann_indices:
-                label = ann_boxes[idx][0]
-                logging.info(f"Бокс {idx} (метка '{label}') из '{os.path.basename(ann_path)}' не имеет соответствия в главной аннотации")
-        if not unmatched_gt_indices and not unmatched_ann_indices:
-            logging.info("Все боксы из главной и сравниваемой аннотации найдены с порогом IoU")
+            x2_min, x2_max = xc2 - w2 / 2, xc2 + w2 / 2
+            y2_min, y2_max = yc2 - h2 / 2, yc2 + h2 / 2
+            iou = calculate_iou([x1_min, y1_min, x1_max, y1_max], [x2_min, y2_min, x2_max, y2_max])
+            iou_matrix[i, j] = iou
+    # Жадный алгоритм сопоставления боксов
+    box_differences = []
+    while True:
+        max_iou = np.max(iou_matrix)
+        if max_iou < threshold_iou:
+            break
+        max_idx = np.unravel_index(np.argmax(iou_matrix), iou_matrix.shape)
+        i, j = max_idx
+        matched_gt_indices.add(i)
+        matched_ann_indices.add(j)
+        b1 = ground_truth_boxes[i]
+        b2 = ann_boxes[j]
+        label1, xc1_norm, yc1_norm, w1_norm, h1_norm = b1
+        label2, xc2_norm, yc2_norm, w2_norm, h2_norm = b2
+        _, xc1, yc1, w1, h1 = denormalize_box(b1, width, height)
+        _, xc2, yc2, w2, h2 = denormalize_box(b2, width, height)
+        center_diff = np.sqrt((xc1 - xc2) ** 2 + (yc1 - yc2) ** 2)
+        size_diff_w = abs(w1 - w2)
+        size_diff_h = abs(h1 - h2)
+        significant_difference = center_diff > threshold_center or size_diff_w > threshold_size or size_diff_h > threshold_size
+        box_differences.append({
+            'gt_index': i,
+            'ann_index': j,
+            'label_gt': label1,
+            'label_ann': label2,
+            'center_diff': center_diff,
+            'size_diff_w': size_diff_w,
+            'size_diff_h': size_diff_h,
+            'iou': max_iou,
+            'significant': significant_difference
+        })
+        iou_matrix[i, :] = -1
+        iou_matrix[:, j] = -1
+    # Собираем информацию о несопоставленных боксах
+    unmatched_gt_indices = set(range(len(ground_truth_boxes))) - matched_gt_indices
+    unmatched_ann_indices = set(range(len(ann_boxes))) - matched_ann_indices
+    return box_differences, unmatched_gt_indices, unmatched_ann_indices
 
 def main():
-    image_path = IMAGE_PATH
-    ground_truth_path = GROUND_TRUTH_PATH
-    other_annotation_paths = OTHER_ANNOTATION_PATHS
+    image_dir = IMAGE_DIR
+    ground_truth_dir = GROUND_TRUTH_DIR
     output_dir = OUTPUT_DIR
     threshold_iou = THRESHOLD_IOU
     threshold_center = THRESHOLD_CENTER
     threshold_size = THRESHOLD_SIZE
     draw_overlay = DRAW_OVERLAY
     overlay_annotations = OVERLAY_ANNOTATIONS
-    annotation_formats = OTHER_ANNOTATION_FORMATS
+    annotation_format = ANNOTATION_FORMAT
     ground_truth_format = GROUND_TRUTH_FORMAT
     os.makedirs(output_dir, exist_ok=True)
-    # Проверка наличия файлов
-    if not os.path.exists(image_path):
-        logging.error(f"Изображение '{image_path}' не найдено.")
+    # Получаем список изображений
+    image_files = [f for f in os.listdir(image_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+    if not image_files:
+        logging.error(f"Не найдено изображений в директории '{image_dir}'")
         return
-    if not os.path.exists(ground_truth_path):
-        logging.error(f"Файл с эталонными аннотациями '{ground_truth_path}' не найден.")
-        return
-    if len(other_annotation_paths) != len(annotation_formats):
-        logging.error("Количество путей аннотаций и форматов не совпадает.")
-        return
-    for ann_path in other_annotation_paths:
-        if not os.path.exists(ann_path):
-            logging.warning(f"Файл аннотаций '{ann_path}' не найден. Пропускаем.")
+    # Сбор сводки по данным из эталонной и сравниваемой разметок
+    summary = {}
+    differences_in_counts = []
+    for image_file in image_files:
+        image_base_name = os.path.splitext(image_file)[0]
+        ground_truth_annotation_file = image_base_name + '.' + ground_truth_format
+        ground_truth_path = os.path.join(ground_truth_dir, ground_truth_annotation_file)
+        annotation_file = image_base_name + '.' + annotation_format
+        annotation_path = os.path.join(image_dir, annotation_file)
+        image_path = os.path.join(image_dir, image_file)
+        image = read_image(image_path)
+        if image is None:
             continue
-    # Рисуем bounding boxes для всех аннотаций
-    all_annotation_paths = [ground_truth_path] + other_annotation_paths
-    all_annotation_formats = [ground_truth_format] + annotation_formats
-    draw_bounding_boxes(image_path, all_annotation_paths, all_annotation_formats, output_dir, draw_overlay, overlay_annotations)
-    # Сравниваем аннотации
-    compare_annotations(
-        ground_truth_path,
-        ground_truth_format,
-        other_annotation_paths,
-        annotation_formats,
-        image_path,
-        threshold_iou=threshold_iou,
-        threshold_center=threshold_center,
-        threshold_size=threshold_size
-    )
+        image_shape = image.shape
+        gt_exists = os.path.exists(ground_truth_path)
+        ann_exists = os.path.exists(annotation_path)
+        gt_num = None
+        ann_num = None
+        if gt_exists:
+            ground_truth_boxes = read_annotation(ground_truth_path, img_width=image_shape[1], img_height=image_shape[0], fmt=ground_truth_format)
+            gt_num = len(ground_truth_boxes)
+        if ann_exists:
+            ann_boxes = read_annotation(annotation_path, img_width=image_shape[1], img_height=image_shape[0], fmt=annotation_format)
+            ann_num = len(ann_boxes)
+        summary[image_file] = {'gt_num': gt_num, 'ann_num': ann_num, 'gt_exists': gt_exists, 'ann_exists': ann_exists}
+        if gt_num is not None and ann_num is not None and gt_num != ann_num:
+            differences_in_counts.append(image_file)
+    # Вывод сводки
+    logging.info("\nСводка по данным из эталонной разметки:")
+    for image_file in image_files:
+        info = summary.get(image_file, {})
+        gt_exists = info.get('gt_exists', False)
+        gt_num = info.get('gt_num', None)
+        if not gt_exists:
+            logging.info(f"Изображение '{image_file}': эталонная аннотация не найдена.")
+        elif gt_num == 0:
+            logging.info(f"Изображение '{image_file}': нет объектов в эталонной разметке.")
+        else:
+            logging.info(f"Изображение '{image_file}': {gt_num} объектов в эталонной разметке.")
+    # Вывод информации о различиях в количестве объектов
+    if differences_in_counts:
+        logging.info("\nИзображения с различиями в количестве объектов между эталонной и сравниваемой разметками:")
+        for image_file in differences_in_counts:
+            info = summary[image_file]
+            logging.info(f"Изображение '{image_file}': {info['gt_num']} объектов в эталонной разметке, {info['ann_num']} объектов в сравниваемой разметке.")
+    else:
+        logging.info("\nНет различий в количестве объектов между эталонной и сравниваемой разметками.")
+    # Обработка каждого изображения
+    for image_file in image_files:
+        image_path = os.path.join(image_dir, image_file)
+        image_base_name = os.path.splitext(image_file)[0]
+        annotation_file = image_base_name + '.' + annotation_format
+        annotation_path = os.path.join(image_dir, annotation_file)
+        ground_truth_annotation_file = image_base_name + '.' + ground_truth_format
+        ground_truth_path = os.path.join(ground_truth_dir, ground_truth_annotation_file)
+        if not os.path.exists(annotation_path):
+            logging.warning(f"Аннотация для изображения '{image_file}' не найдена. Пропускаем.")
+            continue
+        if not os.path.exists(ground_truth_path):
+            logging.warning(f"Эталонная аннотация для изображения '{image_file}' не найдена. Пропускаем.")
+            continue
+        # Рисуем bounding boxes
+        annotation_paths = [ground_truth_path, annotation_path]
+        annotation_formats = [ground_truth_format, annotation_format]
+        draw_bounding_boxes(image_path, annotation_paths, annotation_formats, output_dir, draw_overlay, overlay_annotations)
+        # Сравниваем аннотации
+        image = read_image(image_path)
+        if image is None:
+            continue
+        image_shape = image.shape
+        ground_truth_boxes = read_annotation(ground_truth_path, img_width=image_shape[1], img_height=image_shape[0], fmt=ground_truth_format)
+        ann_boxes = read_annotation(annotation_path, img_width=image_shape[1], img_height=image_shape[0], fmt=annotation_format)
+        differences, unmatched_gt, unmatched_ann = compare_annotations(
+            ground_truth_boxes,
+            ann_boxes,
+            image_shape,
+            threshold_iou=threshold_iou,
+            threshold_center=threshold_center,
+            threshold_size=threshold_size
+        )
+        # Выводим результаты сравнения
+        logging.info(f"\nСравнение аннотаций для изображения '{image_file}':")
+        if differences:
+            for diff in differences:
+                logging.info(f"Бокс {diff['gt_index']} (метка '{diff['label_gt']}') из эталонной аннотации и бокс {diff['ann_index']} (метка '{diff['label_ann']}') из аннотации изображения:")
+                logging.info(f"  Смещение центров: {diff['center_diff']:.2f} пикселей")
+                logging.info(f"  Разница в ширине: {diff['size_diff_w']:.2f} пикселей")
+                logging.info(f"  Разница в высоте: {diff['size_diff_h']:.2f} пикселей")
+                logging.info(f"  IoU: {diff['iou']:.4f}")
+                if diff['significant']:
+                    logging.info("  → Значимые отличия по порогам")
+                else:
+                    logging.info("  → Незначительные отличия по порогам")
+        else:
+            logging.info("Нет совпадающих боксов с порогом IoU.")
+        if unmatched_gt:
+            for idx in unmatched_gt:
+                label = ground_truth_boxes[idx][0]
+                logging.info(f"Бокс {idx} (метка '{label}') из эталонной аннотации не имеет соответствия в аннотации изображения")
+        if unmatched_ann:
+            for idx in unmatched_ann:
+                label = ann_boxes[idx][0]
+                logging.info(f"Бокс {idx} (метка '{label}') из аннотации изображения не имеет соответствия в эталонной аннотации")
+        if not differences and not unmatched_gt and not unmatched_ann:
+            logging.info("Все боксы из эталонной и сравниваемой аннотаций найдены с порогом IoU")
 
 if __name__ == '__main__':
     main()
