@@ -655,14 +655,19 @@ def multi_cut(annotated_image: AnnotatedImageData) -> Tuple[List[Tuple[Annotated
             duplicates.extend(object_subimages[1:])
         # Добавляем пустые подкадры
         empty_subimages = [item for item in image_result if not item[4]]
-        for item in empty_subimages:
-            unique_subimages[frozenset()] = item
+        for idx, item in enumerate(empty_subimages):
+            key = ('empty', idx)  # Используем индекс пустого подкадра как уникальный ключ
+            unique_subimages[key] = item
     else:
         for item in image_result:
-            key = frozenset(item[4])  # Используем неизменяемое множество как ключ
-            if key in unique_subimages:
-                duplicates.append(item)
-            else:
+            if item[4]:  # Если подкадр содержит объекты
+                key = frozenset(item[4])
+                if key in unique_subimages:
+                    duplicates.append(item)
+                else:
+                    unique_subimages[key] = item
+            else:  # Пустые подкадры
+                key = ('empty', item[2], item[3])  # Используем позицию подкадра как уникальный ключ
                 unique_subimages[key] = item
 
     return list(unique_subimages.values()), duplicates
