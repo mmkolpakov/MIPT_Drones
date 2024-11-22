@@ -1,9 +1,8 @@
 import math
-
 import cv2
 import xml.etree.ElementTree as ET
 import logging
-from typing import Tuple, List, Optional, Dict, Union
+from typing import Tuple, List, Optional, Dict, Union, Set
 from pathlib import Path
 import sys
 import numpy as np
@@ -15,17 +14,15 @@ from enum import Enum
 # --------------------------- Константы ---------------------------
 
 # Путь к директории с исходными данными (изображениями и аннотациями)
-# NOTE поставил свои пути
 INPUT_DIR = Path(r"C:\Users\mkolp\OneDrive\Изображения\test")
 
 # Путь к директории для сохранения результатов
-# NOTE поставил свои пути
 OUTPUT_DIR = Path(r"C:\Users\mkolp\OneDrive\Изображения\test\results")
 
 # Параметры разделения изображения
 SPLIT_HORIZONTAL = 2  # Количество разбиений по горизонтали
-SPLIT_VERTICAL = 2    # Количество разбиений по вертикали
-OVERLAP = 0.46 # перекрытие двух соседних частей [долей от исходного]
+SPLIT_VERTICAL = 2  # Количество разбиений по вертикали
+OVERLAP = 0.46  # перекрытие двух соседних частей [долей от исходного]
 
 # Форматы сохраняемых изображений
 SUPPORTED_IMAGE_FORMATS = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
@@ -49,12 +46,18 @@ LOG_CSV_PATH = OUTPUT_DIR / "process_log.csv"
 # Путь к файлу для сравнения аннотаций
 DELTA_PIXELS_CSV = OUTPUT_DIR / "delta_pixels.csv"
 
+
 class NamingMethod(Enum):
     COORDINATES = 1
     NUMERICAL = 2
 
+
 # Способ именования: NamingMethod.COORDINATES или NamingMethod.NUMERICAL
 NAMING_METHOD = NamingMethod.NUMERICAL
+
+# Имя подпапки для дубликатов
+DUPLICATES_DIR_NAME = "duplicates"
+
 
 # -----------------------------------------------------------------
 
@@ -63,6 +66,7 @@ class ImageData:
     """
     Класс для хранения данных изображения.
     """
+
     def __init__(self, data: np.ndarray, image_size_x: int, image_size_y: int):
         self.data = data
         self.image_size_x = image_size_x
@@ -73,14 +77,18 @@ class AnnotatedImageData(ImageData):
     """
     Класс для хранения данных изображения и его аннотаций.
     """
+
     def __init__(self, data: np.ndarray, image_size_x: int, image_size_y: int,
                  annotation: Union[ET.Element, List[str]],
                  annotation_format: str,
-                 image_path: Optional[Path] = None):
+                 image_path: Optional[Path] = None,
+                 object_ids: Optional[List[int]] = None):
         super().__init__(data, image_size_x, image_size_y)
         self.annotation = annotation
         self.annotation_format = annotation_format  # '.xml' или '.txt'
         self.image_path = image_path  # Путь к текущему изображению
+        self.object_ids = object_ids if object_ids is not None else []  # Список object_id для каждого объекта
+
 
 def load_image(image_path: Path) -> Optional[np.ndarray]:
     """
@@ -124,14 +132,14 @@ def save_image(img: np.ndarray, output_path: Path, image_format: str) -> None:
 
 
 def calculate_split_coordinates(
-    width: int,
-    height: int,
-    split_h: int,
-    split_v: int,
-    overlap: float
+        width: int,
+        height: int,
+        split_h: int,
+        split_v: int,
+        overlap: float
 ) -> List[Tuple[int, int, int, int]]:
     """
-    Вычисляет координаты для разбиения изображения на сетку.
+    Вычисляет координаты для разбиения изображения на сетку, гарантируя покрытие всего изображения.
 
     :param width: Ширина изображения.
     :param height: Высота изображения.
@@ -139,6 +147,7 @@ def calculate_split_coordinates(
     :param split_v: Количество разбиений по вертикали.
     :param overlap: Размер перекрытия соседних разрезов в долях от исходного изображения (от 0 до 1).
     :return: Список кортежей с координатами (x1, y1, x2, y2) для каждого участка.
+    :raises ValueError: Если overlap не в диапазоне [0, 1), split_h или split_v <= 0, или разрезы имеют разные размеры.
     """
     if not (0 <= overlap < 1):
         raise ValueError("Overlap must be between 0 and 1.")
@@ -149,112 +158,139 @@ def calculate_split_coordinates(
     overlap_pixels_x = overlap * width
     overlap_pixels_y = overlap * height
 
-    # Вычисление размеров подизображений с округлением вниз
+    # Вычисление размеров подизображений
     sub_width = math.floor((width + (split_h - 1) * overlap_pixels_x) / split_h)
     sub_height = math.floor((height + (split_v - 1) * overlap_pixels_y) / split_v)
-
-    # Вычисление шагов смещения
-    step_x = sub_width - overlap_pixels_x
-    step_y = sub_height - overlap_pixels_y
 
     coords = []
 
     for i in range(split_v):
         for j in range(split_h):
-            x1 = int(math.floor(j * step_x))
-            y1 = int(math.floor(i * step_y))
-            x2 = x1 + sub_width
-            y2 = y1 + sub_height
+            x1 = int(math.floor(j * (sub_width - overlap_pixels_x)))
+            y1 = int(math.floor(i * (sub_height - overlap_pixels_y)))
 
-            # Корректировка, чтобы не выйти за пределы изображения
-            if x2 > width:
-                x2 = width
-                x1 = width - sub_width
-            if y2 > height:
-                y2 = height
-                y1 = height - sub_height
+            #  Использование ceil для последних подкадров для гарантии покрытия
+            x2 = int(math.ceil(x1 + sub_width) if j == split_h - 1 else math.floor(x1 + sub_width))
+            y2 = int(math.ceil(y1 + sub_height) if i == split_v - 1 else math.floor(y1 + sub_height))
 
-            coords.append((int(x1), int(y1), int(x2), int(y2)))
+            # Корректировка, чтобы не выйти за пределы изображения (для надежности)
+            x2 = min(x2, width)
+            y2 = min(y2, height)
 
-    # Проверка и коррекция координат для одинаковых размеров
-    final_sub_width = coords[0][2] - coords[0][0]
-    final_sub_height = coords[0][3] - coords[0][1]
+            coords.append((x1, y1, x2, y2))
+
+    # Проверка размеров подкадров
+    first_sub_width = coords[0][2] - coords[0][0]
+    first_sub_height = coords[0][3] - coords[0][1]
+
+    # Допускаем разницу в 1 пиксель для последнего ряда/столбца
     for coord in coords:
-        if (coord[2] - coord[0] != final_sub_width) or (coord[3] - coord[1] != final_sub_height):
-            raise ValueError("Разрезы имеют разные размеры, проверьте параметры разреза и перекрытия.")
+        if not ((coord[2] - coord[0] == first_sub_width or abs(coord[2] - coord[0] - first_sub_width) <= 1) and (
+                coord[3] - coord[1] == first_sub_height or abs(coord[3] - coord[1] - first_sub_height) <= 1)):
+            raise ValueError(f"Разрезы имеют разные размеры {coord}, проверьте параметры разреза и перекрытия.")
 
-    print("sub_width", final_sub_width, "sub_height", final_sub_height)
-    print("coords are:", coords)
+    # Проверка покрытия всего изображения
+    covered_area = 0
+    for x1, y1, x2, y2 in coords:
+        covered_area += (x2 - x1) * (y2 - y1)
+
+    if covered_area < width * height:
+        raise ValueError("Разбиение не покрывает все изображение.")
+
     return coords
 
 
-def adjust_bndbox_voc(bndbox: ET.Element, split_coords: Tuple[int, int, int, int],
-                      cropped_size: Tuple[int, int]) -> Optional[Tuple[int, int, int, int]]:
+def adjust_bndbox_voc(obj: ET.Element, bndbox: ET.Element, split_coords: Tuple[int, int, int, int],
+                      cropped_size: Tuple[int, int]) -> Optional[Tuple[int, int, int, int, int]]:
     """
     Корректирует координаты ограничивающего прямоугольника объекта относительно вырезанного участка для PASCAL VOC (XML).
 
+    :param obj: Элемент объекта.
     :param bndbox: Элемент XML с координатами объекта.
     :param split_coords: Кортеж с координатами участка (x1, y1, x2, y2).
     :param cropped_size: Размеры вырезанного изображения (width, height).
-    :return: Кортеж с новыми координатами (new_xmin, new_ymin, new_xmax, new_ymax) или None.
+    :return: Кортеж с новыми координатами (object_id, new_xmin, new_ymin, new_xmax, new_ymax) или None, если объект не попадает в разрез или имеет некорректные координаты.
     """
     x1, y1, x2, y2 = split_coords
     cropped_width, cropped_height = cropped_size
 
     try:
-        xmin = int(bndbox.find("xmin").text)
-        ymin = int(bndbox.find("ymin").text)
-        xmax = int(bndbox.find("xmax").text)
-        ymax = int(bndbox.find("ymax").text)
-    except (AttributeError, ValueError) as e:
-        logging.warning(f"Некорректные координаты bndbox: {e}")
+        xmin = int(float(bndbox.find("xmin").text))
+        ymin = int(float(bndbox.find("ymin").text))
+        xmax = int(float(bndbox.find("xmax").text))
+        ymax = int(float(bndbox.find("ymax").text))
+    except (AttributeError, ValueError, TypeError) as e:
+        logging.error(f"Некорректные координаты bndbox в объекте: {obj}: {e}")
         return None
 
-    # Проверка пересечения
-    if xmax <= x1 or xmin >= x2 or ymax <= y1 or ymin >= y2:
-        return None  # Объект не пересекается с текущим участком
-
-    # Проверяем, полностью ли объект внутри разреза
-    if xmin >= x1 and xmax <= x2 and ymin >= y1 and ymax <= y2:
-        # Объект полностью внутри разреза, корректируем координаты относительно вырезанного участка
-        return (xmin - x1, ymin - y1, xmax - x1, ymax - y1)  # Полностью внутри
+    # Проверка пересечения с учетом минимальной площади
+    intersection_area = max(0, min(xmax, x2) - max(xmin, x1)) * max(0, min(ymax, y2) - max(ymin, y1))
+    if intersection_area < MIN_INTERSECTION_AREA:
+        logging.debug(f"Объект {obj} не пересекается с участком или площадь пересечения меньше минимальной.")
+        return None
 
     # Корректировка координат
-    new_xmin = max(xmin - x1, 0)
-    new_ymin = max(ymin - y1, 0)
-    new_xmax = min(xmax - x1, cropped_width)
-    new_ymax = min(ymax - y1, cropped_height)
+    new_xmin = max(0, xmin - x1)
+    new_ymin = max(0, ymin - y1)
+    new_xmax = min(cropped_width, xmax - x1)
+    new_ymax = min(cropped_height, ymax - y1)
 
-    # Проверка минимальной площади пересечения
-    if (new_xmax - new_xmin) * (new_ymax - new_ymin) < MIN_INTERSECTION_AREA:
-        return None
-
+    # Проверка на корректность после обрезки.
     if new_xmax <= new_xmin or new_ymax <= new_ymin:
+        logging.debug(
+            f"Объект {obj} обрезан некорректно: new_xmin={new_xmin}, new_ymin={new_ymin}, new_xmax={new_xmax}, new_ymax={new_ymax}")
         return None
 
-    return new_xmin, new_ymin, new_xmax, new_ymax
+    object_id = int(obj.find("object_id").text) if obj.find(
+        "object_id") is not None else -1  #Если object_id не найден, возвращаем -1. Это должно быть обработано далее.
+
+    return object_id, new_xmin, new_ymin, new_xmax, new_ymax
 
 
-def adjust_bndbox_yolo(bndbox: str, split_coords: Tuple[int, int, int, int],
-                      original_size: Tuple[int, int],
-                      cropped_size: Tuple[int, int]) -> Optional[str]:
+import logging
+import hashlib
+
+
+def generate_unique_object_id(image_path: str, line: str) -> int:
+    """
+    Генерирует уникальный object_id на основе имени файла и строки аннотации.
+    """
+    hash_string = f"{image_path}_{line}".encode('utf-8')
+    return int(hashlib.md5(hash_string).hexdigest(), 16) % 1000000  # Ограничиваем object_id до 6 знаков
+
+
+def adjust_bndbox_yolo(line: str, image_path: Path, split_coords: Tuple[int, int, int, int],
+                       original_size: Tuple[int, int],
+                       cropped_size: Tuple[int, int]) -> Optional[Tuple[str, int]]:
     """
     Корректирует координаты ограничивающего прямоугольника объекта относительно вырезанного участка для YOLO (TXT).
 
-    :param bndbox: Строка с координатами объекта в формате YOLO (class x_center y_center width height).
-    :param split_coords: Кортеж с координатами участка (x1, y1, x2, y2).
-    :param original_size: Размеры исходного изображения (width, height).
-    :param cropped_size: Размеры вырезанного изображения (width, height).
-    :return: Строка с новыми координатами объекта или None.
+     :param line: Строка с координатами объекта в формате YOLO (class x_center y_center width height [object_id]).
+    :param image_path: Путь к исходному изображению для генерации уникального object_id.
+        :param split_coords: Кортеж с координатами участка (x1, y1, x2, y2).
+        :param original_size: Размеры исходного изображения (width, height).
+        :param cropped_size: Размеры вырезанного изображения (width, height).
+    :return: Кортеж из строки с новыми координатами объекта и его object_id или None, если объект не попадает в разрез или имеет некорректные координаты.
     """
     try:
-        parts = bndbox.strip().split()
-        if len(parts) != 5:
-            logging.warning(f"Некорректный формат bndbox YOLO: {bndbox}")
-            return None
-        class_id, x_center, y_center, width, height = map(float, parts)
-    except ValueError as e:
-        logging.warning(f"Некорректные координаты bndbox YOLO: {e}")
+        parts = line.strip().split()
+
+        # Проверяем наличие object_id в строке аннотации, если есть - сохраняем, если нет, генерируем.
+        if len(parts) == 6:
+            class_id, x_center, y_center, width, height, object_id = parts
+            object_id = int(object_id)
+        elif len(parts) == 5:
+            class_id, x_center, y_center, width, height = parts
+            object_id = generate_unique_object_id(str(image_path), line)
+        else:
+            raise ValueError(f"Некорректный формат строки YOLO: {line}")
+
+        class_id, x_center, y_center, width, height = map(float, [class_id, x_center, y_center, width,
+                                                                  height])  #Явное преобразование в float
+
+
+    except (ValueError, TypeError) as e:
+        logging.error(f"Некорректные координаты bndbox YOLO в строке '{line}': {e}")
         return None
 
     original_width, original_height = original_size
@@ -300,11 +336,13 @@ def adjust_bndbox_yolo(bndbox: str, split_coords: Tuple[int, int, int, int],
     norm_width = new_width / cropped_size[0]
     norm_height = new_height / cropped_size[1]
 
-    return f"{int(class_id)} {norm_x_center:.6f} {norm_y_center:.6f} {norm_width:.6f} {norm_height:.6f}"
+    new_line = f"{int(class_id)} {norm_x_center:.6f} {norm_y_center:.6f} {norm_width:.6f} {norm_height:.6f}"
+
+    return new_line, object_id
 
 
 def cut_with_annotation(annotated_image: AnnotatedImageData, cut_set: Tuple[int, int, int, int],
-                        split_idx: int) -> Tuple[AnnotatedImageData, Path, int, int]:
+                        split_idx: int) -> Tuple[AnnotatedImageData, Path, int, int, Set[int]]:
     """
     Вырезает часть изображения и соответствующие аннотации.
 
@@ -312,7 +350,7 @@ def cut_with_annotation(annotated_image: AnnotatedImageData, cut_set: Tuple[int,
     :param cut_set: Кортеж с координатами разреза (x1, y1, x2, y2).
     :param split_idx: Индекс текущей части для имени файла.
     :return: Кортеж из нового AnnotatedImageData с вырезанным изображением и обновленными аннотациями,
-             и пути к новому изображению, а также позиций левого верхнего угла (x1, y1).
+             пути к новому изображению, позиций левого верхнего угла (x1, y1) и множества object_id объектов на подкадре.
     """
     x1, y1, x2, y2 = cut_set  # Извлечение координат
 
@@ -336,9 +374,12 @@ def cut_with_annotation(annotated_image: AnnotatedImageData, cut_set: Tuple[int,
         raise ValueError(f"Неизвестный способ именования: {NAMING_METHOD}")
 
     # Сохраняем в той же директории, что и исходная картинка
-    new_image_path = annotated_image.image_path.parent / new_filename if annotated_image.image_path else Path(new_filename)
+    new_image_path = annotated_image.image_path.parent / new_filename if annotated_image.image_path else Path(
+        new_filename)
 
     # Корректируем аннотации
+    object_ids_in_crop = set()
+
     if annotated_image.annotation_format == '.xml':
         new_annotation_root = ET.Element("annotation")
 
@@ -363,9 +404,11 @@ def cut_with_annotation(annotated_image: AnnotatedImageData, cut_set: Tuple[int,
         # Обработка объектов
         for obj in annotated_image.annotation.findall("object"):
             bndbox = obj.find("bndbox")
-            adjusted_coords = adjust_bndbox_voc(bndbox, cut_set, (cropped_width, cropped_height))
-            if adjusted_coords is None:
+            adjusted_result = adjust_bndbox_voc(obj, bndbox, cut_set, (cropped_width, cropped_height))
+            if adjusted_result is None:
                 continue  # Объект не пересекается или пересечение слишком мало
+
+            object_id, new_xmin, new_ymin, new_xmax, new_ymax = adjusted_result
 
             new_obj = ET.SubElement(new_annotation_root, "object")
             # Копирование всех подэлементов объекта кроме bndbox
@@ -376,22 +419,37 @@ def cut_with_annotation(annotated_image: AnnotatedImageData, cut_set: Tuple[int,
 
             # Создание нового bndbox
             new_bndbox = ET.SubElement(new_obj, "bndbox")
-            ET.SubElement(new_bndbox, "xmin").text = str(adjusted_coords[0])
-            ET.SubElement(new_bndbox, "ymin").text = str(adjusted_coords[1])
-            ET.SubElement(new_bndbox, "xmax").text = str(adjusted_coords[2])
-            ET.SubElement(new_bndbox, "ymax").text = str(adjusted_coords[3])
+            ET.SubElement(new_bndbox, "xmin").text = str(new_xmin)
+            ET.SubElement(new_bndbox, "ymin").text = str(new_ymin)
+            ET.SubElement(new_bndbox, "xmax").text = str(new_xmax)
+            ET.SubElement(new_bndbox, "ymax").text = str(new_ymax)
+
+            object_ids_in_crop.add(object_id)
 
         new_annotation = new_annotation_root
 
+
     elif annotated_image.annotation_format == '.txt':
+
         new_yolo_annotations = []
+
         original_size = (annotated_image.image_size_x, annotated_image.image_size_y)
-        for line in annotated_image.annotation:
-            adjusted_ann = adjust_bndbox_yolo(line, cut_set, original_size, (cropped_width, cropped_height))
-            if adjusted_ann is not None:
+
+        for idx, line in enumerate(annotated_image.annotation):
+
+            # Передаем image_path в adjust_bndbox_yolo
+
+            adjusted_result = adjust_bndbox_yolo(line, annotated_image.image_path, cut_set, original_size,
+                                                 (cropped_width, cropped_height))
+
+            if adjusted_result is not None:
+                adjusted_ann, object_id = adjusted_result
+
                 new_yolo_annotations.append(adjusted_ann)
 
-        new_annotation = new_yolo_annotations
+                object_ids_in_crop.add(object_id)
+
+            new_annotation = new_yolo_annotations
 
     else:
         logging.error(f"Неизвестный формат аннотаций: {annotated_image.annotation_format}")
@@ -403,13 +461,15 @@ def cut_with_annotation(annotated_image: AnnotatedImageData, cut_set: Tuple[int,
         image_size_y=cropped_height,
         annotation=new_annotation,
         annotation_format=annotated_image.annotation_format,
-        image_path=new_image_path  # Устанавливаем путь к новому изображению
+        image_path=new_image_path,  # Устанавливаем путь к новому изображению
+        object_ids=list(object_ids_in_crop)
     )
 
-    return split_image_data, new_image_path, x1, y1
+    return split_image_data, new_image_path, x1, y1, object_ids_in_crop
 
 
-def verify(annotated_image: AnnotatedImageData, cut_set: Tuple[int, int, int, int]) -> Tuple[int, float, Tuple[bool, bool]]:
+def verify(annotated_image: AnnotatedImageData, cut_set: Tuple[int, int, int, int]) -> Tuple[
+    int, float, Tuple[bool, bool]]:
     """
     Проверяет, сколько объектов пересекают границы разреза и вычисляет минимальную долю объекта внутри.
 
@@ -511,12 +571,12 @@ def verify(annotated_image: AnnotatedImageData, cut_set: Tuple[int, int, int, in
         return N, min_percent, axis
 
 
-def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageData, Path, int, int]]:
+def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageData, Path, int, int, Set[int]]]:
     """
     Разделяет изображение и аннотации на сетку с заданными параметрами, корректируя разрезы для сохранения размеров и позиций.
 
     :param annotated_image: Объект AnnotatedImageData с исходными данными.
-    :return: Список кортежей из AnnotatedImageData с вырезанными частями, пути к новым изображениям и позиций (x1, y1).
+    :return: Список кортежей из AnnotatedImageData с вырезанными частями, пути к новым изображениям, позиций (x1, y1) и множеств object_id.
     """
     # Вычисление базовых координат разреза
     split_coords_list = calculate_split_coordinates(
@@ -596,7 +656,8 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
                 )
 
             # Проверяем, что разрез корректен
-            if current_split[0] < 0 or current_split[1] < 0 or current_split[2] > annotated_image.image_size_x or current_split[3] > annotated_image.image_size_y:
+            if current_split[0] < 0 or current_split[1] < 0 or current_split[2] > annotated_image.image_size_x or \
+                    current_split[3] > annotated_image.image_size_y:
                 logging.debug(f"Попытка {attempt + 1}: разрез выходит за пределы изображения {current_split}. Пропуск.")
                 continue
 
@@ -624,10 +685,14 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
             logging.info(f"Идеальный разрез не найден для части {idx}. Выбирается наилучший доступный вариант.")
 
         # Вырезаем изображение и аннотации по выбранному разрезу
-        split_image_data, split_image_path, split_x, split_y = cut_with_annotation(annotated_image, best_cut, idx)
-        image_result.append((split_image_data, split_image_path, split_x, split_y))
+        split_image_data, split_image_path, split_x, split_y, object_ids_in_crop = cut_with_annotation(annotated_image,
+                                                                                                       best_cut, idx)
+        image_result.append((split_image_data, split_image_path, split_x, split_y, object_ids_in_crop))
 
     return image_result
+
+
+global_object_id_counter = 1
 
 
 def process_all_images(input_dir: Path, output_dir: Path) -> None:
@@ -637,6 +702,8 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
     :param input_dir: Путь к директории с исходными изображениями и аннотациями.
     :param output_dir: Путь к директории для сохранения разделенных изображений и аннотаций.
     """
+    global global_object_id_counter
+
     if not input_dir.is_dir():
         logging.error(f"Входная директория не существует или не является директорией: {input_dir}")
         sys.exit(1)
@@ -649,6 +716,10 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
         return
 
     logging.info(f"Найдено {len(image_files)} изображений для обработки.")
+
+    # Создание директории для дубликатов
+    duplicates_dir = output_dir / DUPLICATES_DIR_NAME
+    duplicates_dir.mkdir(parents=True, exist_ok=True)
 
     # Инициализация CSV лога
     try:
@@ -678,7 +749,6 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
                     logging.warning(f"Для изображения '{image_path}' не найден соответствующий файл аннотаций.")
                     continue
 
-                # Определение относительного пути к изображению для сохранения структуры
                 try:
                     relative_path = image_path.relative_to(input_dir).parent
                 except ValueError:
@@ -692,12 +762,27 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
 
                 # Парсинг аннотаций
                 annotation_format = annotation_path.suffix.lower()
+                object_ids = []  # Список object_id для объектов
+
                 if annotation_format == '.xml':
                     logging.info(f"Парсинг XML-аннотаций из '{annotation_path}'...")
                     try:
                         tree = ET.parse(str(annotation_path))
                         root = tree.getroot()
                         annotation = root
+
+                        # Используем глобальный счетчик object_id для XML, проверяем существование object_id
+                        for obj in annotation.findall("object"):
+                            if obj.find("object_id") is None:
+                                object_id_elem = ET.Element("object_id")
+                                object_id_elem.text = str(global_object_id_counter)
+                                obj.append(object_id_elem)
+                                object_ids.append(global_object_id_counter)
+                                global_object_id_counter += 1
+                            else:
+                                # object_id уже существует, добавляем в список object_ids
+                                object_ids.append(int(obj.find("object_id").text))
+
                     except ET.ParseError as e:
                         logging.error(f"Ошибка парсинга XML-аннотаций: {e}")
                         continue
@@ -707,6 +792,19 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
                         yolo_annotations = [line.strip() for line in
                                             annotation_path.read_text(encoding='utf-8').splitlines() if line.strip()]
                         annotation = yolo_annotations  # Список строк для корректной передачи в AnnotatedImageData
+
+                        # Нумерация объектов
+                        # object_ids = list(range(1, len(yolo_annotations) + 1))
+
+                        for line in yolo_annotations:
+                            parts = line.strip().split()
+                            if len(parts) == 6:
+                                object_id = int(parts[5])
+                                object_ids.append(object_id)
+                            elif len(parts) == 5:
+                                object_id = generate_unique_object_id(str(image_path), line)
+                                object_ids.append(object_id)  #Добавляем сгенерированный object_id в object_ids
+
                     except Exception as e:
                         logging.error(f"Ошибка чтения YOLO-аннотаций: {e}")
                         continue
@@ -719,44 +817,63 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
                 if image is None:
                     logging.error(f"Изображение не найдено или не может быть загружено: {image_path}")
                     continue
+
                 height, width = image.shape[:2]
                 depth = image.shape[2] if len(image.shape) == 3 else 1
-                logging.debug(f"Размер изображения: {width}x{height}, Глубина: {depth}")
 
-                # Создание AnnotatedImageData объекта
                 annotated_image = AnnotatedImageData(
                     data=image,
                     image_size_x=width,
                     image_size_y=height,
                     annotation=annotation,
                     annotation_format=annotation_format,
-                    image_path=image_path  # Ссылка на оригинальное изображение
+                    image_path=image_path,  # Ссылка на оригинальное изображение
+                    object_ids=object_ids
                 )
 
-                # Применение multi_cut
                 try:
                     split_images_with_pos = multi_cut(annotated_image)
                 except Exception as e:
                     logging.error(f"Ошибка при разрезании изображения '{image_path}': {e}")
                     continue
 
-                # Сохранение разрезанных изображений и аннотаций
-                for split_img_data, split_image_path, split_x, split_y in split_images_with_pos:
+                # Отслеживание уникальных наборов object_id  - теперь храним frozenset
+                unique_object_sets = set()
+                duplicates = []
+
+                for split_img_data, split_image_path, split_x, split_y, object_ids_in_crop in split_images_with_pos:
+                    object_ids_key = frozenset(object_ids_in_crop)
                     # Обновление пути для сохранения в соответствии с относительной структурой
                     split_image_path = image_output_dir / split_image_path.name
+                    new_annotation_path = split_image_path.with_suffix(annotation_format)
 
-                    # Сохранение изображения
+                    is_duplicate = False
+
+                    if len(object_ids) == 1:
+                        if len(object_ids_key) > 0 and len(
+                                unique_object_sets) > 0:  # Если один объект и уже есть кадр с объектом
+                            is_duplicate = True
+
+                    elif object_ids_key in unique_object_sets and len(
+                            object_ids_key) > 0:  #Проверяем только непустые наборы объектов
+                        is_duplicate = True
+
+                    if is_duplicate:
+                        duplicates.append((split_img_data, split_image_path, split_x, split_y, new_annotation_path))
+                        continue
+
+                    if len(object_ids_key) > 0:  # Добавляем только непустые наборы
+                        unique_object_sets.add(object_ids_key)
+
+                        # Сохранение изображения
                     try:
                         save_image(split_img_data.data, split_image_path, IMAGE_FORMAT)
                     except IOError as e:
                         logging.error(e)
                         continue  # Переход к следующей части
 
-                    # Сохранение аннотаций
-                    new_annotation_path = split_image_path.with_suffix(annotation_format)
-
+                        # Сохранение аннотаций
                     if annotation_format == '.xml':
-                        # Сохранение XML
                         try:
                             new_tree = ET.ElementTree(split_img_data.annotation)
                             new_tree.write(new_annotation_path, encoding='utf-8', xml_declaration=True)
@@ -764,7 +881,6 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
                         except Exception as e:
                             logging.error(f"Ошибка при сохранении XML-аннотаций '{new_annotation_path}': {e}")
                     elif annotation_format == '.txt':
-                        # Сохранение YOLO
                         try:
                             with new_annotation_path.open('w', encoding='utf-8') as f:
                                 for line in split_img_data.annotation:
@@ -773,7 +889,47 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
                         except Exception as e:
                             logging.error(f"Ошибка при сохранении YOLO-аннотаций '{new_annotation_path}': {e}")
 
-                    # Запись в CSV лог
+                        # Запись в CSV лог
+                    log_writer.writerow([
+                        str(image_path),
+                        str(annotation_path),
+                        str(split_image_path),
+                        str(split_x),
+                        str(split_y),
+                        str(new_annotation_path)
+                    ])
+
+                # Обработка дубликатов
+                for split_img_data, split_image_path, split_x, split_y, new_annotation_path in duplicates:
+                    # Обновление пути для сохранения в директории дубликатов
+                    split_image_path = duplicates_dir / split_image_path.name
+                    new_annotation_path = split_image_path.with_suffix(annotation_format)
+
+                    try:
+                        save_image(split_img_data.data, split_image_path, IMAGE_FORMAT)
+                    except IOError as e:
+                        logging.error(e)
+                        continue  # Переход к следующей части
+
+                    if annotation_format == '.xml':
+
+                        try:
+                            new_tree = ET.ElementTree(split_img_data.annotation)
+                            new_tree.write(new_annotation_path, encoding='utf-8', xml_declaration=True)
+                            logging.debug(f"Сохранены аннотации XML (дубликат): {new_annotation_path}")
+                        except Exception as e:
+                            logging.error(f"Ошибка при сохранении XML-аннотаций '{new_annotation_path}': {e}")
+                    elif annotation_format == '.txt':
+                        # Сохранение YOLO
+                        try:
+                            with new_annotation_path.open('w', encoding='utf-8') as f:
+                                for line in split_img_data.annotation:
+                                    f.write(f"{line}\n")
+                            logging.debug(f"Сохранены аннотации YOLO (дубликат): {new_annotation_path}")
+                        except Exception as e:
+                            logging.error(f"Ошибка при сохранении YOLO-аннотаций '{new_annotation_path}': {e}")
+
+                            # Запись в CSV лог
                     log_writer.writerow([
                         str(image_path),
                         str(annotation_path),
@@ -797,18 +953,21 @@ def inverse_process_log(output_dir: Path) -> Dict[str, Dict]:
     :param output_dir: Путь к директории с результатами и логом.
     :return: Словарь с восстановленными аннотациями для каждого оригинального изображения.
     """
-    reconstructed_annotations = defaultdict(lambda: {'objects': []})
+    reconstructed_annotations = defaultdict(lambda: {'objects': {}})
 
     try:
         with LOG_CSV_PATH.open('r', newline='', encoding='utf-8') as csvfile:
             log_reader = csv.DictReader(csvfile)
             for row in log_reader:
                 original_image = row['Original Image']
-                original_annotation = row['Original Annotation']
                 split_image = row['Split Image']
                 split_pos_x = int(row['Split Position X'])
                 split_pos_y = int(row['Split Position Y'])
                 split_annotation = row['Split Annotation']
+
+                # Пропускаем дубликаты
+                if DUPLICATES_DIR_NAME in Path(split_image).parts:
+                    continue
 
                 # Загрузка аннотаций частей
                 split_annotation_path = Path(split_annotation)
@@ -824,19 +983,27 @@ def inverse_process_log(output_dir: Path) -> Dict[str, Dict]:
                             xmax = int(bndbox.find("xmax").text) + split_pos_x
                             ymax = int(bndbox.find("ymax").text) + split_pos_y
 
-                            # Создаем новый объект с обновленными координатами
-                            new_obj = ET.Element("object")
-                            for elem in obj:
-                                if elem.tag == "bndbox":
-                                    new_bndbox = ET.SubElement(new_obj, "bndbox")
-                                    ET.SubElement(new_bndbox, "xmin").text = str(xmin)
-                                    ET.SubElement(new_bndbox, "ymin").text = str(ymin)
-                                    ET.SubElement(new_bndbox, "xmax").text = str(xmax)
-                                    ET.SubElement(new_bndbox, "ymax").text = str(ymax)
-                                else:
-                                    new_elem = ET.SubElement(new_obj, elem.tag)
-                                    new_elem.text = elem.text
-                            reconstructed_annotations[original_image]['objects'].append(new_obj)
+                            object_id_elem = obj.find("object_id")
+                            if object_id_elem is not None:
+                                object_id = int(object_id_elem.text)
+                            else:
+                                continue  # Пропускаем объекты без object_id
+
+                            # Проверяем, был ли объект уже добавлен
+                            if object_id not in reconstructed_annotations[original_image]['objects']:
+                                # Создаем новый объект с обновленными координатами
+                                new_obj = ET.Element("object")
+                                for elem in obj:
+                                    if elem.tag == "bndbox":
+                                        new_bndbox = ET.SubElement(new_obj, "bndbox")
+                                        ET.SubElement(new_bndbox, "xmin").text = str(xmin)
+                                        ET.SubElement(new_bndbox, "ymin").text = str(ymin)
+                                        ET.SubElement(new_bndbox, "xmax").text = str(xmax)
+                                        ET.SubElement(new_bndbox, "ymax").text = str(ymax)
+                                    else:
+                                        new_elem = ET.SubElement(new_obj, elem.tag)
+                                        new_elem.text = elem.text
+                                reconstructed_annotations[original_image]['objects'][object_id] = new_obj
                     except ET.ParseError as e:
                         logging.error(f"Ошибка парсинга XML аннотаций из '{split_annotation}': {e}")
                         continue
@@ -844,7 +1011,7 @@ def inverse_process_log(output_dir: Path) -> Dict[str, Dict]:
                     try:
                         with split_annotation_path.open('r', encoding='utf-8') as f:
                             lines = f.readlines()
-                            for line in lines:
+                            for idx, line in enumerate(lines):
                                 parts = line.strip().split()
                                 if len(parts) != 5:
                                     continue
@@ -875,19 +1042,23 @@ def inverse_process_log(output_dir: Path) -> Dict[str, Dict]:
                                 xmax = obj_x_center + obj_width_split / 2
                                 ymax = obj_y_center + obj_height_split / 2
 
-                                # Создаем новый объект в формате PASCAL VOC для удобства сравнения
-                                new_obj = ET.Element("object")
-                                ET.SubElement(new_obj, "name").text = str(int(class_id))
-                                ET.SubElement(new_obj, "pose").text = "Unspecified"
-                                ET.SubElement(new_obj, "truncated").text = "0"
-                                ET.SubElement(new_obj, "difficult").text = "0"
-                                bndbox = ET.SubElement(new_obj, "bndbox")
-                                ET.SubElement(bndbox, "xmin").text = str(int(xmin))
-                                ET.SubElement(bndbox, "ymin").text = str(int(ymin))
-                                ET.SubElement(bndbox, "xmax").text = str(int(xmax))
-                                ET.SubElement(bndbox, "ymax").text = str(int(ymax))
+                                # Получаем object_id
+                                object_id = idx + 1  # Индекс объекта в файле аннотаций
 
-                                reconstructed_annotations[original_image]['objects'].append(new_obj)
+                                # Проверяем, был ли объект уже добавлен
+                                if object_id not in reconstructed_annotations[original_image]['objects']:
+                                    # Создаем новый объект в формате PASCAL VOC для удобства сравнения
+                                    new_obj = ET.Element("object")
+                                    ET.SubElement(new_obj, "name").text = str(int(class_id))
+                                    ET.SubElement(new_obj, "pose").text = "Unspecified"
+                                    ET.SubElement(new_obj, "truncated").text = "0"
+                                    ET.SubElement(new_obj, "difficult").text = "0"
+                                    bndbox = ET.SubElement(new_obj, "bndbox")
+                                    ET.SubElement(bndbox, "xmin").text = str(int(xmin))
+                                    ET.SubElement(bndbox, "ymin").text = str(int(ymin))
+                                    ET.SubElement(bndbox, "xmax").text = str(int(xmax))
+                                    ET.SubElement(bndbox, "ymax").text = str(int(ymax))
+                                    reconstructed_annotations[original_image]['objects'][object_id] = new_obj
                     except Exception as e:
                         logging.error(f"Ошибка чтения YOLO аннотаций из '{split_annotation}': {e}")
                         continue
@@ -900,6 +1071,7 @@ def inverse_process_log(output_dir: Path) -> Dict[str, Dict]:
         logging.error(f"Ошибка при обработке лог-файла: {e}")
 
     return reconstructed_annotations
+
 
 def compute_iou(boxA, boxB):
     # Координаты пересечения
@@ -921,9 +1093,13 @@ def compute_iou(boxA, boxB):
     iou = interArea / float(boxAArea + boxBArea - interArea)
     return iou
 
+
 def compare_annotations(original_dir: Path, reconstructed_annotations: Dict[str, Dict]) -> None:
     """
     Сравнивает исходные и восстановленные аннотации, выводя разницу в пикселях.
+
+    :param original_dir: Путь к директории с исходными изображениями и аннотациями.
+    :param reconstructed_annotations: Словарь с восстановленными аннотациями.
     """
     delta_results = []
 
@@ -939,18 +1115,69 @@ def compare_annotations(original_dir: Path, reconstructed_annotations: Dict[str,
             continue
 
         if original_annotation_path.suffix.lower() == '.xml':
-            # Существующий код для XML аннотаций (без изменений)
-            # ...
-            pass  # Оставляем существующий код
+            try:
+                # Загружаем исходные XML аннотации
+                tree = ET.parse(str(original_annotation_path))
+                root = tree.getroot()
+                original_objects = root.findall("object")
+
+                original_bboxes = {}
+                for obj in original_objects:
+                    object_id_elem = obj.find("object_id")
+                    if object_id_elem is not None:
+                        object_id = int(object_id_elem.text)
+                    else:
+                        continue  # Пропускаем объекты без object_id
+
+                    bndbox = obj.find("bndbox")
+                    xmin = float(bndbox.find("xmin").text)
+                    ymin = float(bndbox.find("ymin").text)
+                    xmax = float(bndbox.find("xmax").text)
+                    ymax = float(bndbox.find("ymax").text)
+                    original_bboxes[object_id] = (xmin, ymin, xmax, ymax)
+
+                # Восстановленные аннотации
+                reconstructed_objects = data.get('objects', {})
+                for object_id, rec_obj in reconstructed_objects.items():
+                    if object_id in original_bboxes:
+                        orig_bbox = original_bboxes[object_id]
+                        bndbox = rec_obj.find("bndbox")
+                        xmin = float(bndbox.find("xmin").text)
+                        ymin = float(bndbox.find("ymin").text)
+                        xmax = float(bndbox.find("xmax").text)
+                        ymax = float(bndbox.find("ymax").text)
+                        rec_bbox = (xmin, ymin, xmax, ymax)
+
+                        delta_xmin = abs(orig_bbox[0] - rec_bbox[0])
+                        delta_ymin = abs(orig_bbox[1] - rec_bbox[1])
+                        delta_xmax = abs(orig_bbox[2] - rec_bbox[2])
+                        delta_ymax = abs(orig_bbox[3] - rec_bbox[3])
+
+                        delta_pixels = f"Delta_xmin: {delta_xmin:.2f}, Delta_ymin: {delta_ymin:.2f}, Delta_xmax: {delta_xmax:.2f}, Delta_ymax: {delta_ymax:.2f}"
+
+                        delta_results.append({
+                            'Original Image': original_image,
+                            'Object ID': object_id,
+                            'Delta Pixels': delta_pixels
+                        })
+                    else:
+                        delta_results.append({
+                            'Original Image': original_image,
+                            'Object ID': object_id,
+                            'Delta Pixels': "Object not found in original annotations"
+                        })
+            except Exception as e:
+                logging.error(f"Ошибка обработки XML аннотаций для '{original_annotation_path}': {e}")
+                continue
+
         elif original_annotation_path.suffix.lower() == '.txt':
             try:
                 # Загружаем исходные YOLO аннотации
                 with original_annotation_path.open('r', encoding='utf-8') as f:
                     original_yolo_annotations = [line.strip() for line in f if line.strip()]
 
-                # Преобразуем исходные аннотации в абсолютные координаты
-                original_bboxes = []
-                for line in original_yolo_annotations:
+                original_bboxes = {}
+                for idx, line in enumerate(original_yolo_annotations):
                     parts = line.split()
                     if len(parts) != 5:
                         continue
@@ -970,48 +1197,39 @@ def compare_annotations(original_dir: Path, reconstructed_annotations: Dict[str,
                     ymin = obj_y_center - obj_height / 2
                     xmax = obj_x_center + obj_width / 2
                     ymax = obj_y_center + obj_height / 2
-                    original_bboxes.append((xmin, ymin, xmax, ymax))
+                    object_id = idx + 1  # Нумерация объектов
+                    original_bboxes[object_id] = (xmin, ymin, xmax, ymax)
 
-                # Восстановленные аннотации уже в формате PASCAL VOC
-                reconstructed_objects = data.get('objects', [])
-                reconstructed_bboxes = []
-                for obj in reconstructed_objects:
-                    bndbox = obj.find("bndbox")
-                    if bndbox is not None:
+                # Восстановленные аннотации
+                reconstructed_objects = data.get('objects', {})
+                for object_id, rec_obj in reconstructed_objects.items():
+                    if object_id in original_bboxes:
+                        orig_bbox = original_bboxes[object_id]
+                        bndbox = rec_obj.find("bndbox")
                         xmin = float(bndbox.find("xmin").text)
                         ymin = float(bndbox.find("ymin").text)
                         xmax = float(bndbox.find("xmax").text)
                         ymax = float(bndbox.find("ymax").text)
-                        reconstructed_bboxes.append((xmin, ymin, xmax, ymax))
+                        rec_bbox = (xmin, ymin, xmax, ymax)
 
-                # Сопоставление на основе IoU
-                matched_indices = set()
-                for orig_idx, orig_bbox in enumerate(original_bboxes):
-                    max_iou = 0
-                    matched_rec_idx = -1
-                    for rec_idx, rec_bbox in enumerate(reconstructed_bboxes):
-                        if rec_idx in matched_indices:
-                            continue
-                        iou = compute_iou(orig_bbox, rec_bbox)
-                        if iou > max_iou:
-                            max_iou = iou
-                            matched_rec_idx = rec_idx
-                    if max_iou > 0.5 and matched_rec_idx != -1:
-                        rec_bbox = reconstructed_bboxes[matched_rec_idx]
-                        matched_indices.add(matched_rec_idx)
                         delta_xmin = abs(orig_bbox[0] - rec_bbox[0])
                         delta_ymin = abs(orig_bbox[1] - rec_bbox[1])
                         delta_xmax = abs(orig_bbox[2] - rec_bbox[2])
                         delta_ymax = abs(orig_bbox[3] - rec_bbox[3])
-                        delta_pixels = f"Delta_xmin: {delta_xmin:.2f}, Delta_ymin: {delta_ymin:.2f}, Delta_xmax: {delta_xmax:.2f}, Delta_ymax: {delta_ymax:.2f}"
-                    else:
-                        delta_pixels = "No matching reconstructed object found"
 
-                    delta_results.append({
-                        'Original Image': original_image,
-                        'Object Index': orig_idx,
-                        'Delta Pixels': delta_pixels
-                    })
+                        delta_pixels = f"Delta_xmin: {delta_xmin:.2f}, Delta_ymin: {delta_ymin:.2f}, Delta_xmax: {delta_xmax:.2f}, Delta_ymax: {delta_ymax:.2f}"
+
+                        delta_results.append({
+                            'Original Image': original_image,
+                            'Object ID': object_id,
+                            'Delta Pixels': delta_pixels
+                        })
+                    else:
+                        delta_results.append({
+                            'Original Image': original_image,
+                            'Object ID': object_id,
+                            'Delta Pixels': "Object not found in original annotations"
+                        })
             except Exception as e:
                 logging.error(f"Ошибка обработки YOLO аннотаций для '{original_annotation_path}': {e}")
                 continue
@@ -1022,7 +1240,7 @@ def compare_annotations(original_dir: Path, reconstructed_annotations: Dict[str,
     # Запись результатов сравнения в CSV
     try:
         with DELTA_PIXELS_CSV.open('w', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ['Original Image', 'Object Index', 'Delta Pixels']
+            fieldnames = ['Original Image', 'Object ID', 'Delta Pixels']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
             writer.writeheader()
