@@ -15,10 +15,10 @@ import hashlib
 # --------------------------- Константы ---------------------------
 
 # Путь к директории с исходными данными (изображениями и аннотациями)
-INPUT_DIR = Path(r"C:\Users\mkolp\OneDrive\Изображения\test")
+INPUT_DIR = Path(r"C:\Users\mkolp\OneDrive\Изображения\break\break")
 
 # Путь к директории для сохранения результатов
-OUTPUT_DIR = Path(r"C:\Users\mkolp\OneDrive\Изображения\test\results")
+OUTPUT_DIR = Path(r"C:\Users\mkolp\OneDrive\Изображения\break\break\results")
 
 # Параметры разделения изображения
 SPLIT_HORIZONTAL = 2  # Количество разбиений по горизонтали
@@ -47,11 +47,9 @@ LOG_CSV_PATH = OUTPUT_DIR / "process_log.csv"
 # Путь к файлу для сравнения аннотаций
 DELTA_PIXELS_CSV = OUTPUT_DIR / "delta_pixels.csv"
 
-
 class NamingMethod(Enum):
     COORDINATES = 1
     NUMERICAL = 2
-
 
 # Способ именования: NamingMethod.COORDINATES или NamingMethod.NUMERICAL
 NAMING_METHOD = NamingMethod.NUMERICAL
@@ -59,9 +57,21 @@ NAMING_METHOD = NamingMethod.NUMERICAL
 # Имя подпапки для дубликатов
 DUPLICATES_DIR_NAME = "duplicates"
 
+# Флаг для включения визуализации разбиений и аннотаций
+VISUALIZE_SPLITS = True  # Установите True для включения визуализации
+
+# Путь к директории для сохранения визуализаций
+VISUALIZATION_DIR = OUTPUT_DIR / "visualizations"
+
+# Создание отдельных папок для каждого типа визуализаций
+ORIGINAL_ANNOTATIONS_DIR = VISUALIZATION_DIR / "original_annotations"
+SPLITS_DIR = VISUALIZATION_DIR / "splits"
+ANNOTATED_SPLITS_DIR = VISUALIZATION_DIR / "annotated_splits"
+
+# Флаг для совмещения разрезов и аннотаций на одном изображении
+VISUALIZE_SPLITS_ON_ANNOTATIONS = True  # Установите True, чтобы совмещать разрезы и аннотации
 
 # -----------------------------------------------------------------
-
 
 class ImageData:
     """
@@ -72,7 +82,6 @@ class ImageData:
         self.data = data
         self.image_size_x = image_size_x
         self.image_size_y = image_size_y
-
 
 class AnnotatedImageData(ImageData):
     """
@@ -90,7 +99,6 @@ class AnnotatedImageData(ImageData):
         self.image_path = image_path  # Путь к текущему изображению
         self.object_ids = object_ids if object_ids is not None else []  # Список object_id для каждого объекта
 
-
 def load_image(image_path: Path) -> Optional[np.ndarray]:
     """
     Загружает изображение с поддержкой путей с нелатинскими символами.
@@ -106,7 +114,6 @@ def load_image(image_path: Path) -> Optional[np.ndarray]:
     except Exception as e:
         logging.error(f"Ошибка при загрузке изображения '{image_path}': {e}")
         return None
-
 
 def save_image(img: np.ndarray, output_path: Path, image_format: str) -> None:
     """
@@ -130,7 +137,6 @@ def save_image(img: np.ndarray, output_path: Path, image_format: str) -> None:
     except Exception as e:
         logging.error(f"Ошибка при сохранении изображения '{output_path}': {e}")
         raise
-
 
 def calculate_split_coordinates(
         width: int,
@@ -200,7 +206,6 @@ def calculate_split_coordinates(
 
     return coords
 
-
 def adjust_bndbox_voc(obj: ET.Element, bndbox: ET.Element, split_coords: Tuple[int, int, int, int],
                       cropped_size: Tuple[int, int]) -> Optional[Tuple[int, int, int, int, int]]:
     """
@@ -247,14 +252,12 @@ def adjust_bndbox_voc(obj: ET.Element, bndbox: ET.Element, split_coords: Tuple[i
 
     return object_id, new_xmin, new_ymin, new_xmax, new_ymax
 
-
 def generate_unique_object_id(image_path: str, line: str) -> int:
     """
     Генерирует уникальный object_id на основе имени файла и строки аннотации.
     """
     hash_string = f"{image_path}_{line}".encode('utf-8')
     return int(hashlib.md5(hash_string).hexdigest(), 16) % 1000000  # Ограничиваем object_id до 6 знаков
-
 
 def adjust_bndbox_yolo(line: str, image_path: Path, split_coords: Tuple[int, int, int, int],
                        original_size: Tuple[int, int],
@@ -336,6 +339,115 @@ def adjust_bndbox_yolo(line: str, image_path: Path, split_coords: Tuple[int, int
 
     return new_line, object_id
 
+def get_color(idx):
+    """
+    Возвращает цвет в формате (B, G, R) на основе индекса.
+    """
+    idx = idx * 3  # Чтобы избежать похожих цветов для последовательных индексов
+    color = ((37 * idx) % 255, (17 * idx) % 255, (29 * idx) % 255)
+    return color
+
+def visualize_annotations(image: np.ndarray, annotations: Union[ET.Element, List[str]], annotation_format: str,
+                          output_path: Path) -> None:
+    """
+    Визуализирует аннотации на изображении и сохраняет результат.
+
+    :param image: Изображение в формате NumPy массива.
+    :param annotations: Аннотации в формате XML или список строк YOLO.
+    :param annotation_format: Формат аннотаций '.xml' или '.txt'.
+    :param output_path: Путь для сохранения визуализированного изображения.
+    """
+    image_copy = image.copy()
+    height, width = image_copy.shape[:2]
+
+    if annotation_format == '.xml':
+        for obj in annotations.findall("object"):
+            bndbox = obj.find("bndbox")
+            try:
+                xmin = int(float(bndbox.find("xmin").text))
+                ymin = int(float(bndbox.find("ymin").text))
+                xmax = int(float(bndbox.find("xmax").text))
+                ymax = int(float(bndbox.find("ymax").text))
+                class_name = obj.find("name").text
+                object_id_elem = obj.find("object_id")
+                if object_id_elem is not None:
+                    object_id = int(object_id_elem.text)
+                else:
+                    object_id = -1
+                label = f"{class_name}:{object_id}"
+                color = get_color(object_id)
+                cv2.rectangle(image_copy, (xmin, ymin), (xmax, ymax), color, 2)
+                cv2.putText(image_copy, label, (xmin, ymin - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            except Exception as e:
+                logging.error(f"Ошибка при визуализации аннотаций XML: {e}")
+    elif annotation_format == '.txt':
+        for line in annotations:
+            parts = line.strip().split()
+            if len(parts) not in [5, 6]:
+                continue
+            try:
+                class_id = int(parts[0])
+                x_center = float(parts[1])
+                y_center = float(parts[2])
+                w = float(parts[3])
+                h = float(parts[4])
+                if len(parts) == 6:
+                    object_id = int(parts[5])
+                else:
+                    object_id = -1
+                x_center_abs = x_center * width
+                y_center_abs = y_center * height
+                w_abs = w * width
+                h_abs = h * height
+                xmin = int(x_center_abs - w_abs / 2)
+                ymin = int(y_center_abs - h_abs / 2)
+                xmax = int(x_center_abs + w_abs / 2)
+                ymax = int(y_center_abs + h_abs / 2)
+                label = f"{class_id}:{object_id}"
+                color = get_color(object_id)
+                cv2.rectangle(image_copy, (xmin, ymin), (xmax, ymax), color, 2)
+                cv2.putText(image_copy, label, (xmin, ymin - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            except Exception as e:
+                logging.error(f"Ошибка при визуализации аннотаций YOLO: {e}")
+    else:
+        logging.error(f"Неизвестный формат аннотаций для визуализации: {annotation_format}")
+        return
+
+    try:
+        save_image(image_copy, output_path, IMAGE_FORMAT)
+        logging.debug(f"Визуализация аннотаций сохранена: {output_path}")
+    except Exception as e:
+        logging.error(f"Ошибка при сохранении визуализации аннотаций: {e}")
+
+def visualize_splits(image: np.ndarray, split_coords_list: List[Tuple[int, int, int, int]], output_path: Path,
+                     annotations: Optional[Union[ET.Element, List[str]]] = None,
+                     annotation_format: Optional[str] = None) -> None:
+    """
+    Визуализирует разрезы (и аннотации при необходимости) на изображении и сохраняет результат.
+
+    :param image: Изображение в формате NumPy массива.
+    :param split_coords_list: Список координат разрезов.
+    :param output_path: Путь для сохранения визуализированного изображения.
+    :param annotations: (Необязательно) Аннотации для визуализации.
+    :param annotation_format: (Необязательно) Формат аннотаций '.xml' или '.txt'.
+    """
+    image_copy = image.copy()
+
+    # Отображение аннотаций, если они предоставлены
+    if annotations and annotation_format:
+        visualize_annotations(image_copy, annotations, annotation_format, output_path)
+
+    for idx, (x1, y1, x2, y2) in enumerate(split_coords_list):
+        color = (255, 0, 0)
+        thickness = 2
+        cv2.rectangle(image_copy, (x1, y1), (x2, y2), color, thickness)
+        cv2.putText(image_copy, f"Split {idx+1}", (x1 + 5, y1 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+    try:
+        save_image(image_copy, output_path, IMAGE_FORMAT)
+        logging.debug(f"Визуализация разрезов сохранена: {output_path}")
+    except Exception as e:
+        logging.error(f"Ошибка при сохранении визуализации разрезов: {e}")
 
 def cut_with_annotation(annotated_image: AnnotatedImageData, cut_set: Tuple[int, int, int, int],
                         split_idx: int) -> Tuple[AnnotatedImageData, Path, int, int, Set[int]]:
@@ -462,7 +574,6 @@ def cut_with_annotation(annotated_image: AnnotatedImageData, cut_set: Tuple[int,
 
     return split_image_data, new_image_path, x1, y1, object_ids_in_crop
 
-
 def verify(annotated_image: AnnotatedImageData, cut_set: Tuple[int, int, int, int]) -> Tuple[
     int, float, Tuple[bool, bool]]:
     """
@@ -569,13 +680,12 @@ def verify(annotated_image: AnnotatedImageData, cut_set: Tuple[int, int, int, in
         logging.error(f"Неизвестный формат аннотаций: {annotated_image.annotation_format}")
         return N, min_percent, axis
 
-
-def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageData, Path, int, int, Set[int]]]:
+def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageData, Path, int, int, Set[int], Tuple[int, int, int, int]]]:
     """
     Разделяет изображение и аннотации на сетку с заданными параметрами, корректируя разрезы для сохранения размеров и позиций.
 
     :param annotated_image: Объект AnnotatedImageData с исходными данными.
-    :return: Список кортежей из AnnotatedImageData с вырезанными частями, пути к новым изображениям, позиций (x1, y1) и множеств object_id.
+    :return: Список кортежей из AnnotatedImageData с вырезанными частями, пути к новым изображениям, позиций (x1, y1), множеств object_id и координат разрезов.
     """
     # Вычисление базовых координат разреза
     split_coords_list = calculate_split_coordinates(
@@ -686,13 +796,11 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
         # Вырезаем изображение и аннотации по выбранному разрезу
         split_image_data, split_image_path, split_x, split_y, object_ids_in_crop = cut_with_annotation(annotated_image,
                                                                                                        best_cut, idx)
-        image_result.append((split_image_data, split_image_path, split_x, split_y, object_ids_in_crop))
+        image_result.append((split_image_data, split_image_path, split_x, split_y, object_ids_in_crop, best_cut))
 
     return image_result
 
-
 global_object_id_counter = 1
-
 
 def process_all_images(input_dir: Path, output_dir: Path) -> None:
     """
@@ -719,6 +827,12 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
     # Создание директории для дубликатов
     duplicates_dir = output_dir / DUPLICATES_DIR_NAME
     duplicates_dir.mkdir(parents=True, exist_ok=True)
+
+    # Создание директории для визуализаций
+    if VISUALIZE_SPLITS:
+        ORIGINAL_ANNOTATIONS_DIR.mkdir(parents=True, exist_ok=True)
+        SPLITS_DIR.mkdir(parents=True, exist_ok=True)
+        ANNOTATED_SPLITS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Инициализация CSV лога
     try:
@@ -831,6 +945,11 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
                     object_ids=object_ids
                 )
 
+                # Визуализация исходных аннотаций
+                if VISUALIZE_SPLITS:
+                    original_vis_path = ORIGINAL_ANNOTATIONS_DIR / f"{image_path.stem}_original{IMAGE_FORMAT}"
+                    visualize_annotations(image, annotation, annotation_format, original_vis_path)
+
                 try:
                     split_images_with_pos = multi_cut(annotated_image)
                 except Exception as e:
@@ -841,7 +960,18 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
                 unique_object_sets = set()
                 duplicates = []
 
-                for split_img_data, split_image_path, split_x, split_y, object_ids_in_crop in split_images_with_pos:
+                # Визуализация разрезов
+                if VISUALIZE_SPLITS:
+                    split_coords_list = [item[-1] for item in split_images_with_pos]
+                    splits_vis_path = SPLITS_DIR / f"{image_path.stem}_splits{IMAGE_FORMAT}"
+                    if VISUALIZE_SPLITS_ON_ANNOTATIONS:
+                        # Совмещаем разрезы и аннотации
+                        visualize_splits(image, split_coords_list, splits_vis_path, annotations=annotation,
+                                         annotation_format=annotation_format)
+                    else:
+                        visualize_splits(image, split_coords_list, splits_vis_path)
+
+                for split_img_data, split_image_path, split_x, split_y, object_ids_in_crop, best_cut in split_images_with_pos:
                     object_ids_key = frozenset(object_ids_in_crop)
                     # Обновление пути для сохранения в соответствии с относительной структурой
                     split_image_path = image_output_dir / split_image_path.name
@@ -882,6 +1012,11 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
                             logging.debug(f"Сохранены аннотации YOLO: {new_annotation_path}")
                         except Exception as e:
                             logging.error(f"Ошибка при сохранении YOLO-аннотаций '{new_annotation_path}': {e}")
+
+                    # Визуализация аннотаций на подснимках
+                    if VISUALIZE_SPLITS:
+                        vis_image_path = ANNOTATED_SPLITS_DIR / f"{split_image_path.stem}_annotated{IMAGE_FORMAT}"
+                        visualize_annotations(split_img_data.data, split_img_data.annotation, annotation_format, vis_image_path)
 
                     # Запись в CSV лог
                     log_writer.writerow([
@@ -939,7 +1074,6 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
 
     logging.info("Обработка всех изображений завершена.")
 
-
 def inverse_process_log(output_dir: Path) -> Dict[str, Dict]:
     """
     Обрабатывает лог-файл и собирает из аннотаций частей исходную аннотацию.
@@ -958,10 +1092,6 @@ def inverse_process_log(output_dir: Path) -> Dict[str, Dict]:
                 split_pos_x = int(row['Split Position X'])
                 split_pos_y = int(row['Split Position Y'])
                 split_annotation = row['Split Annotation']
-
-                # Учитываем все подснимки, включая дубликаты
-                # if DUPLICATES_DIR_NAME in Path(split_image).parts:
-                #     continue
 
                 # Загрузка аннотаций частей
                 split_annotation_path = Path(split_annotation)
@@ -1012,7 +1142,8 @@ def inverse_process_log(output_dir: Path) -> Dict[str, Dict]:
                                     object_id = int(object_id)
                                 elif len(parts) == 5:
                                     class_id, x_center, y_center, width, height = parts
-                                    object_id = generate_unique_object_id(str(split_annotation_path), line)
+                                    # Используем original_image при генерации object_id
+                                    object_id = generate_unique_object_id(original_image, line)
                                 else:
                                     continue  # Пропускаем некорректные строки
 
@@ -1076,7 +1207,6 @@ def inverse_process_log(output_dir: Path) -> Dict[str, Dict]:
 
     return reconstructed_annotations
 
-
 def compute_iou(boxA, boxB):
     # Координаты пересечения
     xA = max(boxA[0], boxB[0])
@@ -1096,7 +1226,6 @@ def compute_iou(boxA, boxB):
     # IoU
     iou = interArea / float(boxAArea + boxBArea - interArea)
     return iou
-
 
 def compare_annotations(original_dir: Path, reconstructed_annotations: Dict[str, Dict]) -> None:
     """
@@ -1188,7 +1317,9 @@ def compare_annotations(original_dir: Path, reconstructed_annotations: Dict[str,
                         object_id = int(object_id)
                     elif len(parts) == 5:
                         class_id, x_center, y_center, width, height = parts
-                        object_id = generate_unique_object_id(str(original_annotation_path), line)
+                        # Используем original_image_path при генерации object_id
+                        original_image_path = Path(original_image)
+                        object_id = generate_unique_object_id(str(original_image_path), line)
                     else:
                         continue
 
@@ -1266,7 +1397,6 @@ def compare_annotations(original_dir: Path, reconstructed_annotations: Dict[str,
     except Exception as e:
         logging.error(f"Ошибка при записи результатов сравнения в CSV: {e}")
 
-
 def main():
     """
     Основная функция скрипта.
@@ -1297,7 +1427,6 @@ def main():
 
     # Сравнение исходных и восстановленных аннотаций
     compare_annotations(INPUT_DIR, reconstructed_annotations)
-
 
 if __name__ == "__main__":
     main()
