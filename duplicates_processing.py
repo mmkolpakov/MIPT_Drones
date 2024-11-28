@@ -7,9 +7,8 @@ import xml.etree.ElementTree as ET
 import numpy as np
 from pathlib import Path
 from collections import defaultdict
-from typing import Dict, Optional, Union, List
+from typing import Dict, Optional
 import copy
-from math import ceil
 
 # --------------------------- Константы и настройки ---------------------------
 
@@ -26,7 +25,7 @@ SUPPORTED_ANNOTATION_FORMATS = ['.xml', '.txt']  # XML для PASCAL VOC, TXT д
 
 # Словарь функций аугментации из библиотеки albumentations
 AUGMENTATION_FUNCTIONS = {
-    'blur': A.Blur(blur_limit=(3, 7), p=1.0),
+    'blur': A.Blur(blur_limit=(7, 15), p=1.0),
     'horizontal_flip': A.HorizontalFlip(p=1.0),
     'color_jitter': A.ColorJitter(
         brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2, p=1.0
@@ -71,25 +70,6 @@ def get_class_distribution(duplicates_dir: Path, output_dir: Path) -> Dict[str, 
                 distribution[class_name] += 1
     logging.debug(f"Распределение классов: {dict(distribution)}")
     return dict(distribution)
-
-
-def calculate_augmentation_multiplier(distribution: Dict[str, int]) -> Dict[str, int]:
-    """
-    Вычисляет, сколько раз необходимо аугментировать каждый класс для балансировки.
-
-    :param distribution: Словарь, сопоставляющий имена классов с их количеством.
-    :return: Словарь с коэффициентом аугментации для каждого класса.
-    """
-    if not distribution:
-        logging.warning("Распределение классов пусто. Нет аугментаций для применения.")
-        return {}
-    max_count = max(distribution.values())
-    augmentation_multiplier = {}
-    for class_name, count in distribution.items():
-        multiplier = ceil(max_count / count)
-        augmentation_multiplier[class_name] = multiplier
-        logging.debug(f"Класс {class_name}: требуется увеличить в {multiplier} раз(а)")
-    return augmentation_multiplier
 
 
 def load_image(image_path: Path) -> Optional[np.ndarray]:
@@ -299,44 +279,37 @@ def apply_augmentation(image: np.ndarray, augmentation_function: A.BasicTransfor
 
 def adjust_augmentation_mapping(distribution: Dict[str, int]) -> Dict[str, str]:
     """
-    Динамически корректирует сопоставление аугментаций на основе распределения классов.
+    Изменяет сопоставление аугментаций.
 
     :param distribution: Словарь распределения классов.
     :return: Словарь сопоставления классов и аугментаций.
     """
     # Сортируем классы по количеству изображений в порядке убывания
     sorted_classes = sorted(distribution.items(), key=lambda item: item[1], reverse=True)
-    class_counts = [count for _, count in sorted_classes]
-    unique_counts = set(class_counts)
+    class_augmentation_mapping = {}
 
-    class_augmentation = {}
+    max_count = sorted_classes[0][1]
+    classes_with_max_count = [class_name for class_name, count in sorted_classes if count == max_count]
 
-    if len(sorted_classes) >= 4:
-        if len(unique_counts) == 1:
-            # Все классы имеют одинаковое количество изображений
-            logging.info("Все классы имеют одинаковое количество изображений.")
-            augmentations = ['blur', 'horizontal_flip', 'color_jitter']
-            for idx, (class_name, _) in enumerate(sorted_classes):
-                aug = augmentations[idx % len(augmentations)]
-                class_augmentation[class_name] = aug
-                logging.debug(f"Классу {class_name} назначена аугментация '{aug}'")
-        else:
-            # Стандартное распределение аугментаций
-            class_augmentation[sorted_classes[0][0]] = 'blur'
-            class_augmentation[sorted_classes[1][0]] = 'horizontal_flip'
-            logging.debug(f"Классу {sorted_classes[0][0]} назначена аугментация 'blur'")
-            logging.debug(f"Классу {sorted_classes[1][0]} назначена аугментация 'horizontal_flip'")
-            for class_name, _ in sorted_classes[2:]:
-                class_augmentation[class_name] = 'color_jitter'
-                logging.debug(f"Классу {class_name} назначена аугментация 'color_jitter'")
+    # Приоритет распределения аугментаций
+    if len(classes_with_max_count) >= 2:
+        # Если два или более класса имеют максимальное количество изображений
+        class_augmentation_mapping[classes_with_max_count[0]] = 'blur'
+        class_augmentation_mapping[classes_with_max_count[1]] = 'horizontal_flip'
+        for class_name, _ in sorted_classes:
+            if class_name not in class_augmentation_mapping:
+                class_augmentation_mapping[class_name] = 'color_jitter'
     else:
-        # Если классов меньше четырех, распределяем аугментации циклично
-        augmentations = ['blur', 'horizontal_flip', 'color_jitter']
-        for idx, (class_name, _) in enumerate(sorted_classes):
-            aug = augmentations[idx % len(augmentations)]
-            class_augmentation[class_name] = aug
-            logging.debug(f"Классу {class_name} назначена аугментация '{aug}'")
-    return class_augmentation
+        # Если один класс имеет максимальное количество изображений
+        class_augmentation_mapping[sorted_classes[0][0]] = 'blur'
+        if len(sorted_classes) > 1:
+            class_augmentation_mapping[sorted_classes[1][0]] = 'horizontal_flip'
+        for class_name, _ in sorted_classes:
+            if class_name not in class_augmentation_mapping:
+                class_augmentation_mapping[class_name] = 'color_jitter'
+
+    logging.debug(f"Сопоставление аугментаций: {class_augmentation_mapping}")
+    return class_augmentation_mapping
 
 
 def process_duplicates(duplicates_dir: Path, output_dir: Path, image_format: str) -> None:
@@ -356,10 +329,9 @@ def process_duplicates(duplicates_dir: Path, output_dir: Path, image_format: str
         logging.info("Нет классов для аугментации. Завершение обработки.")
         return
 
-    # Динамически корректируем сопоставление аугментаций
+    # Изменяем сопоставление аугментаций
     class_augmentation_mapping = adjust_augmentation_mapping(distribution)
 
-    augmentation_multipliers = calculate_augmentation_multiplier(distribution)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for image_file in duplicates_dir.rglob('*'):
@@ -378,7 +350,6 @@ def process_duplicates(duplicates_dir: Path, output_dir: Path, image_format: str
             continue
 
         class_name = f"_{match.group(1)}"
-        multiplier = augmentation_multipliers.get(class_name, 1)
 
         # Получаем функцию аугментации для этого класса
         augmentation_name = class_augmentation_mapping.get(class_name, 'color_jitter')
@@ -413,51 +384,44 @@ def process_duplicates(duplicates_dir: Path, output_dir: Path, image_format: str
             logging.error(f"Не удалось загрузить аннотации для: {image_file}")
             continue
 
-        # Определяем количество применений аугментации
-        if augmentation_name in DETERMINISTIC_AUGMENTATIONS:
-            num_augmentations = min(multiplier, 1)
-        else:
-            num_augmentations = multiplier
+        logging.debug(f"К файлу {image_file.name} будет применена аугментация '{augmentation_name}'")
 
-        logging.debug(f"К файлу {image_file.name} будет применена аугментация '{augmentation_name}' {num_augmentations} раз(а)")
+        augmented_image = apply_augmentation(image, augmentation_function)
 
-        for i in range(num_augmentations):
-            augmented_image = apply_augmentation(image, augmentation_function)
-
-            # Обновляем аннотации, если необходимо
-            if augmentation_name == 'horizontal_flip':
-                image_width = image.shape[1]
-                # Создаём копию аннотаций
-                augmented_annotation = annotation_handler.update_horizontal_flip(
-                    copy.deepcopy(annotation), image_width
-                )
-                logging.debug("Аннотации обновлены после горизонтального отражения")
-            else:
-                augmented_annotation = copy.deepcopy(annotation)  # Аннотации не изменяются
-
-            # Подготавливаем пути для сохранения
-            relative_path = image_file.relative_to(duplicates_dir)
-            # Изменяем имя файла, чтобы включить индекс аугментации и избежать перезаписи
-            output_image_name = relative_path.stem + f"_aug_{i}" + image_format
-            output_image_path = output_dir / relative_path.parent / output_image_name
-            output_annotation_path = output_image_path.with_suffix(annotation_file.suffix)
-
-            # Убеждаемся, что директория для сохранения существует
-            output_image_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Обновляем имя файла в аннотации
-            new_image_filename = output_image_path.name
-            augmented_annotation = annotation_handler.update_filename(
-                augmented_annotation, new_image_filename
+        # Обновляем аннотации, если необходимо
+        if augmentation_name == 'horizontal_flip':
+            image_width = image.shape[1]
+            # Создаём копию аннотаций
+            augmented_annotation = annotation_handler.update_horizontal_flip(
+                copy.deepcopy(annotation), image_width
             )
+            logging.debug("Аннотации обновлены после горизонтального отражения")
+        else:
+            augmented_annotation = copy.deepcopy(annotation)  # Аннотации не изменяются
 
-            # Сохраняем аугментированное изображение и аннотации
-            try:
-                save_image(augmented_image, output_image_path)
-                annotation_handler.save(augmented_annotation, output_annotation_path)
-                logging.info(f"Файл '{output_image_path.name}' сохранен с аугментацией '{augmentation_name}'")
-            except Exception as e:
-                logging.exception(f"Не удалось сохранить данные для: {image_file}, ошибка: {e}")
+        # Подготавливаем пути для сохранения
+        relative_path = image_file.relative_to(duplicates_dir)
+        # Изменяем имя файла, чтобы включить название аугментации и избежать перезаписи
+        output_image_name = relative_path.stem + f"_{augmentation_name}" + image_format
+        output_image_path = output_dir / relative_path.parent / output_image_name
+        output_annotation_path = output_image_path.with_suffix(annotation_file.suffix)
+
+        # Убеждаемся, что директория для сохранения существует
+        output_image_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Обновляем имя файла в аннотации
+        new_image_filename = output_image_path.name
+        augmented_annotation = annotation_handler.update_filename(
+            augmented_annotation, new_image_filename
+        )
+
+        # Сохраняем аугментированное изображение и аннотации
+        try:
+            save_image(augmented_image, output_image_path)
+            annotation_handler.save(augmented_annotation, output_annotation_path)
+            logging.info(f"Файл '{output_image_path.name}' сохранен с аугментацией '{augmentation_name}'")
+        except Exception as e:
+            logging.exception(f"Не удалось сохранить данные для: {image_file}, ошибка: {e}")
 
 
 def main():
