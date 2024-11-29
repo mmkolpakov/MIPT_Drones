@@ -13,7 +13,7 @@ import copy
 # --------------------------- Константы и настройки ---------------------------
 
 # Настройка логирования
-LOG_LEVEL = logging.DEBUG
+LOG_LEVEL = logging.ERROR
 LOG_FORMAT = '%(levelname)s: %(message)s'
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 
@@ -134,6 +134,15 @@ class AnnotationHandler:
     def update_filename(self, annotation, new_filename: str):
         raise NotImplementedError
 
+    def reverse_horizontal_flip(self, param, image_width):
+        raise NotImplementedError
+
+    def compare_annotations(self, annotation, restored_annotation):
+        raise NotImplementedError
+
+    def validate(self, augmented_annotation):
+        raise NotImplementedError
+
 
 class XMLAnnotationHandler(AnnotationHandler):
     """
@@ -169,10 +178,21 @@ class XMLAnnotationHandler(AnnotationHandler):
                     try:
                         xmin = int(xmin_node.text)
                         xmax = int(xmax_node.text)
-                        new_xmin = max(image_width - xmax, 0)
-                        new_xmax = min(image_width - xmin, image_width)
-                        xmin_node.text = str(new_xmin)
-                        xmax_node.text = str(new_xmax)
+
+                        # Отражаем координаты
+                        new_xmin = image_width - xmax
+                        new_xmax = image_width - xmin
+
+                        # Корректируем значения
+                        new_xmin, new_xmax = min(new_xmin, new_xmax), max(new_xmin, new_xmax)
+                        new_xmin = max(min(new_xmin, image_width), 0)
+                        new_xmax = max(min(new_xmax, image_width), 0)
+
+                        new_xmin = int(round(new_xmin))
+                        new_xmax = int(round(new_xmax))
+
+                        xmin_node.text = str(int(round(new_xmin)))
+                        xmax_node.text = str(int(round(new_xmax)))
                         logging.debug(f"Обновлены координаты объекта: xmin={new_xmin}, xmax={new_xmax}")
                     except ValueError as ve:
                         logging.error(f"Некорректные значения координат в XML аннотации: {ve}")
@@ -195,6 +215,124 @@ class XMLAnnotationHandler(AnnotationHandler):
             logging.debug(f"Обновлен путь в аннотации: {new_path}")
         return annotation
 
+    def reverse_horizontal_flip(self, annotation, image_width: int):
+        """
+        Применяет обратное горизонтальное отражение к аннотации.
+        """
+        # повторное применение горизонтального отражения вернет исходные аннотации.
+        return self.update_horizontal_flip(annotation, image_width)
+
+    def validate(self, annotation):
+        """
+        Проверяет корректность данных аннотаций.
+        """
+        valid = True
+        root = annotation.getroot()
+
+        # Получаем размеры изображения
+        size_node = root.find('size')
+        if size_node is not None:
+            width_node = size_node.find('width')
+            height_node = size_node.find('height')
+            if width_node is not None and height_node is not None:
+                try:
+                    image_width = int(width_node.text)
+                    image_height = int(height_node.text)
+                except ValueError:
+                    logging.error("Некорректные значения ширины или высоты изображения в аннотации.")
+                    valid = False
+                    image_width = image_height = None
+            else:
+                logging.error("Не найдены элементы width и height в аннотации.")
+                valid = False
+                image_width = image_height = None
+        else:
+            logging.error("Не найден элемент size в аннотации.")
+            valid = False
+            image_width = image_height = None
+
+        # Проверяем объекты
+        for obj in root.findall('object'):
+            name_node = obj.find('name')
+            object_name = name_node.text if name_node is not None else 'Unknown'
+            bndbox = obj.find('bndbox')
+            if bndbox is not None:
+                xmin_node = bndbox.find('xmin')
+                ymin_node = bndbox.find('ymin')
+                xmax_node = bndbox.find('xmax')
+                ymax_node = bndbox.find('ymax')
+                if None in (xmin_node, ymin_node, xmax_node, ymax_node):
+                    logging.error(f"Некорректная структура bndbox в объекте '{object_name}'.")
+                    valid = False
+                    continue
+                try:
+                    xmin = float(xmin_node.text)
+                    ymin = float(ymin_node.text)
+                    xmax = float(xmax_node.text)
+                    ymax = float(ymax_node.text)
+
+                    # Проверяем координаты
+                    if xmin >= xmax or ymin >= ymax:
+                        logging.error(
+                            f"Некорректные координаты (xmin >= xmax или ymin >= ymax) в объекте '{object_name}': {ET.tostring(obj, encoding='unicode')}")
+                        valid = False
+
+                    # Проверяем отрицательные координаты
+                    if xmin < 0 or ymin < 0 or xmax < 0 or ymax < 0:
+                        logging.error(
+                            f"Отрицательные координаты в объекте '{object_name}': {ET.tostring(obj, encoding='unicode')}")
+                        valid = False
+
+                    if image_width is not None and image_height is not None:
+                        if not (0 <= xmin <= image_width and 0 <= xmax <= image_width):
+                            logging.error(
+                                f"Координаты x выходят за пределы изображения в объекте '{object_name}': {ET.tostring(obj, encoding='unicode')}")
+                            valid = False
+                        if not (0 <= ymin <= image_height and 0 <= ymax <= image_height):
+                            logging.error(
+                                f"Координаты y выходят за пределы изображения в объекте '{object_name}': {ET.tostring(obj, encoding='unicode')}")
+                            valid = False
+                except ValueError:
+                    logging.error(f"Некорректные значения координат в объекте '{object_name}'.")
+                    valid = False
+            else:
+                logging.error(f"Не найден элемент bndbox в объекте '{object_name}'.")
+                valid = False
+        return valid
+
+    def compare_annotations(self, original_annotation, restored_annotation, tolerance=1e-6):
+        """
+        Сравнивает две аннотации и возвращает True, если они эквивалентны.
+        """
+        original_root = original_annotation.getroot()
+        restored_root = restored_annotation.getroot()
+
+        # Проверяем количество объектов
+        original_objects = original_root.findall('object')
+        restored_objects = restored_root.findall('object')
+
+        if len(original_objects) != len(restored_objects):
+            logging.debug("Количество объектов в исходной и восстановленной аннотациях не совпадает")
+            return False
+
+        for orig_obj, rest_obj in zip(original_objects, restored_objects):
+            orig_name = orig_obj.find('name').text
+            rest_name = rest_obj.find('name').text
+
+            if orig_name != rest_name:
+                logging.debug(f"Имена объектов не совпадают: '{orig_name}' и '{rest_name}'")
+                return False
+
+            orig_bndbox = orig_obj.find('bndbox')
+            rest_bndbox = rest_obj.find('bndbox')
+
+            for coord in ['xmin', 'ymin', 'xmax', 'ymax']:
+                orig_coord = float(orig_bndbox.find(coord).text)
+                rest_coord = float(rest_bndbox.find(coord).text)
+                if abs(orig_coord - rest_coord) > tolerance:
+                    logging.debug(f"Координаты '{coord}' не совпадают: {orig_coord} и {rest_coord}")
+                    return False
+        return True
 
 class TXTAnnotationHandler(AnnotationHandler):
     """
@@ -238,9 +376,13 @@ class TXTAnnotationHandler(AnnotationHandler):
                 # Отражаем x_center
                 x_center = 1.0 - x_center
                 x_center = max(min(x_center, 1.0), 0.0)
-                updated_line = f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}\n"
-                if len(parts) == 6:
-                    updated_line = updated_line.strip() + f" {parts[5]}\n"
+                # Формируем обновленную строку
+                updated_parts = [class_id, f"{x_center:.6f}", f"{y_center:.6f}", f"{width:.6f}", f"{height:.6f}"]
+                if len(parts) > 5:
+                    # Сохраняем все дополнительные поля
+                    extra_fields = parts[5:]
+                    updated_parts.extend(extra_fields)
+                updated_line = ' '.join(updated_parts) + '\n'
                 updated_lines.append(updated_line)
                 logging.debug(f"Обновлена строка аннотации: {updated_line.strip()}")
             except ValueError as ve:
@@ -251,6 +393,80 @@ class TXTAnnotationHandler(AnnotationHandler):
         # В формате YOLO имя файла не включается в файл аннотации
         return annotation
 
+    def reverse_horizontal_flip(self, annotation, image_width: int):
+        """
+        Применяет обратное горизонтальное отражение к аннотации.
+        """
+        # повторное применение горизонтального отражения вернет исходные аннотации.
+        return self.update_horizontal_flip(annotation, image_width)
+
+    def validate(self, annotation):
+        """
+        Проверяет корректность данных аннотаций.
+        """
+        valid = True
+        for line in annotation:
+            parts = line.strip().split()
+            if len(parts) < 5:
+                logging.warning(f"Некорректная строка аннотации: {line.strip()}")
+                valid = False
+                continue
+            try:
+                class_id = int(parts[0])
+                x_center = float(parts[1])
+                y_center = float(parts[2])
+                width = float(parts[3])
+                height = float(parts[4])
+
+                # Проверяем диапазоны координат
+                if not (0.0 <= x_center <= 1.0):
+                    logging.error(f"x_center выходит за пределы [0,1]: {x_center} в строке: {line.strip()}")
+                    valid = False
+                if not (0.0 <= y_center <= 1.0):
+                    logging.error(f"y_center выходит за пределы [0,1]: {y_center} в строке: {line.strip()}")
+                    valid = False
+                if not (0.0 < width <= 1.0):
+                    logging.error(f"width выходит за пределы (0,1]: {width} в строке: {line.strip()}")
+                    valid = False
+                if not (0.0 < height <= 1.0):
+                    logging.error(f"height выходит за пределы (0,1]: {height} в строке: {line.strip()}")
+                    valid = False
+
+                # Проверяем, что бокс не выходит за пределы изображения
+                if not (0.0 <= x_center - width / 2 <= 1.0 and 0.0 <= x_center + width / 2 <= 1.0):
+                    logging.error(f"Бокс выходит за пределы изображения по оси x в строке: {line.strip()}")
+                    valid = False
+                if not (0.0 <= y_center - height / 2 <= 1.0 and 0.0 <= y_center + height / 2 <= 1.0):
+                    logging.error(f"Бокс выходит за пределы изображения по оси y в строке: {line.strip()}")
+                    valid = False
+
+                if len(parts) > 5:
+                    extra_fields = parts[5:]
+                    for field in extra_fields:
+                        try:
+                            _ = float(field)
+                        except ValueError:
+                            logging.error(f"Некорректное дополнительное поле '{field}' в строке: {line.strip()}")
+                            valid = False
+
+            except ValueError as ve:
+                logging.error(f"Ошибка при разборе строки аннотации '{line.strip()}': {ve}")
+                valid = False
+        return valid
+
+    def compare_annotations(self, original_annotation, restored_annotation):
+        """
+        Сравнивает две аннотации и возвращает True, если они эквивалентны.
+        """
+        # Удаляем возможные пробелы и символы новой строки для точного сравнения
+        original_lines = [line.strip() for line in original_annotation]
+        restored_lines = [line.strip() for line in restored_annotation]
+
+        if original_lines == restored_lines:
+            return True
+        else:
+            logging.debug("Исходная и восстановленная аннотации не совпадают")
+            return False
 
 def get_annotation_handler(annotation_path: Path) -> Optional[AnnotationHandler]:
     """
@@ -398,6 +614,24 @@ def process_duplicates(duplicates_dir: Path, output_dir: Path, image_format: str
             logging.debug("Аннотации обновлены после горизонтального отражения")
         else:
             augmented_annotation = copy.deepcopy(annotation)  # Аннотации не изменяются
+
+        # Проверяем корректность аннотаций перед сохранением
+        if not annotation_handler.validate(augmented_annotation):
+            logging.error(f"Некорректные аннотации после обработки для изображения: {image_file}")
+            continue
+
+        # Добавляем код для проверки корректности преобразований
+        if augmentation_name == 'horizontal_flip':
+            # Восстанавливаем аннотации
+            restored_annotation = annotation_handler.reverse_horizontal_flip(
+                copy.deepcopy(augmented_annotation), image_width
+            )
+            # Сравниваем восстановленные аннотации с исходными
+            if not annotation_handler.compare_annotations(annotation, restored_annotation):
+                logging.error(f"Преобразование аннотаций некорректно для файла: {image_file}")
+                continue
+            else:
+                logging.debug("Преобразование аннотаций прошло успешно")
 
         # Подготавливаем пути для сохранения
         relative_path = image_file.relative_to(duplicates_dir)
