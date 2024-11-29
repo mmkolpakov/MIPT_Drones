@@ -18,7 +18,7 @@ import hashlib
 INPUT_DIR = Path(r"C:\Users\mkolp\OneDrive\Изображения\break\break")
 
 # Путь к директории для сохранения результатов
-OUTPUT_DIR = Path(r"C:\Users\mkolp\OneDrive\Изображения\break\break\results")
+OUTPUT_DIR = Path(r"C:\Users\mkolp\OneDrive\Изображения\break\results")
 
 # Параметры разделения изображения
 SPLIT_HORIZONTAL = 2  # Количество разбиений по горизонтали
@@ -70,6 +70,8 @@ ANNOTATED_SPLITS_DIR = VISUALIZATION_DIR / "annotated_splits"
 
 # Флаг для совмещения разрезов и аннотаций на одном изображении
 VISUALIZE_SPLITS_ON_ANNOTATIONS = True  # Установите True, чтобы совмещать разрезы и аннотации
+
+REMOVE_OBJECT_ID = True  # Установите True, если нужно удалить поле 'object_id' из аннотаций
 
 # -----------------------------------------------------------------
 
@@ -815,8 +817,12 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
         logging.error(f"Входная директория не существует или не является директорией: {input_dir}")
         sys.exit(1)
 
-    # Поиск всех изображений в директории и подпапках
-    image_files = [p for p in input_dir.rglob('*') if p.suffix.lower() in SUPPORTED_IMAGE_FORMATS]
+    # # Поиск всех изображений в директории и подпапках
+    # image_files = [p for p in input_dir.rglob('*') if p.suffix.lower() in SUPPORTED_IMAGE_FORMATS]
+
+    # Поиск всех изображений в директории и подпапках, исключая OUTPUT_DIR
+    image_files = [p for p in input_dir.rglob('*') if
+                   p.suffix.lower() in SUPPORTED_IMAGE_FORMATS and not p.resolve().is_relative_to(output_dir.resolve())]
 
     if not image_files:
         logging.warning(f"Входная директория '{input_dir}' не содержит поддерживаемых изображений.")
@@ -1397,6 +1403,50 @@ def compare_annotations(original_dir: Path, reconstructed_annotations: Dict[str,
     except Exception as e:
         logging.error(f"Ошибка при записи результатов сравнения в CSV: {e}")
 
+def remove_object_id_from_xml_files(output_dir: Path):
+    """
+    Удаляет элементы 'object_id' из всех XML-аннотаций в заданной директории рекурсивно.
+
+    :param output_dir: Директория, в которой необходимо удалить 'object_id' из XML-файлов.
+    """
+    for xml_file in output_dir.rglob('*.xml'):
+        try:
+            tree = ET.parse(xml_file)
+            root = tree.getroot()
+            for obj in root.findall('object'):
+                object_id_elem = obj.find('object_id')
+                if object_id_elem is not None:
+                    obj.remove(object_id_elem)
+            tree.write(xml_file, encoding='utf-8', xml_declaration=True)
+            logging.debug(f"Удалено 'object_id' из файла: {xml_file}")
+        except Exception as e:
+            logging.error(f"Ошибка при обработке файла '{xml_file}': {e}")
+
+def remove_object_id_from_txt_files(output_dir: Path):
+    """
+    Удаляет 'object_id' из всех TXT-аннотаций в заданной директории рекурсивно.
+
+    :param output_dir: Директория, в которой необходимо удалить 'object_id' из TXT-файлов.
+    """
+    for txt_file in output_dir.rglob('*.txt'):
+        try:
+            lines = txt_file.read_text(encoding='utf-8').splitlines()
+            updated_lines = []
+            for line in lines:
+                parts = line.strip().split()
+                if len(parts) == 6:
+                    # Удаляем последнее поле (object_id)
+                    parts = parts[:-1]
+                    updated_line = ' '.join(parts)
+                    updated_lines.append(updated_line)
+                else:
+                    # Если object_id нет, оставляем строку без изменений
+                    updated_lines.append(line.strip())
+            txt_file.write_text('\n'.join(updated_lines), encoding='utf-8')
+            logging.debug(f"Удалено 'object_id' из файла: {txt_file}")
+        except Exception as e:
+            logging.error(f"Ошибка при обработке файла '{txt_file}': {e}")
+
 def main():
     """
     Основная функция скрипта.
@@ -1427,6 +1477,10 @@ def main():
 
     # Сравнение исходных и восстановленных аннотаций
     compare_annotations(INPUT_DIR, reconstructed_annotations)
+
+    # Удаление 'object_id' из всех аннотаций после сравнения
+    remove_object_id_from_xml_files(OUTPUT_DIR)
+    remove_object_id_from_txt_files(OUTPUT_DIR)
 
 if __name__ == "__main__":
     main()
