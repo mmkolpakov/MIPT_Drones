@@ -212,12 +212,6 @@ def adjust_bndbox_voc(obj: ET.Element, bndbox: ET.Element, split_coords: Tuple[i
                       cropped_size: Tuple[int, int]) -> Optional[Tuple[int, int, int, int, int]]:
     """
     Корректирует координаты ограничивающего прямоугольника объекта относительно вырезанного участка для PASCAL VOC (XML).
-
-    :param obj: Элемент объекта.
-    :param bndbox: Элемент XML с координатами объекта.
-    :param split_coords: Кортеж с координатами участка (x1, y1, x2, y2).
-    :param cropped_size: Размеры вырезанного изображения (width, height).
-    :return: Кортеж с новыми координатами (object_id, new_xmin, new_ymin, new_xmax, new_ymax) или None, если объект не попадает в разрез или имеет некорректные координаты.
     """
     x1, y1, x2, y2 = split_coords
     cropped_width, cropped_height = cropped_size
@@ -231,28 +225,38 @@ def adjust_bndbox_voc(obj: ET.Element, bndbox: ET.Element, split_coords: Tuple[i
         logging.error(f"Некорректные координаты bndbox в объекте: {obj}: {e}")
         return None
 
-    # Проверка пересечения с учетом минимальной площади
-    intersection_area = max(0, min(xmax, x2) - max(xmin, x1)) * max(0, min(ymax, y2) - max(ymin, y1))
+    # Вычисление пересечения
+    intersect_xmin = max(xmin, x1)
+    intersect_ymin = max(ymin, y1)
+    intersect_xmax = min(xmax, x2)
+    intersect_ymax = min(ymax, y2)
+
+    # Проверка на существование пересечения
+    if intersect_xmin >= intersect_xmax or intersect_ymin >= intersect_ymax:
+        logging.debug(f"Объект {obj} не пересекается с участком или пересечение слишком мало.")
+        return None
+
+    # Вычисление площади пересечения
+    intersection_area = (intersect_xmax - intersect_xmin) * (intersect_ymax - intersect_ymin)
     if intersection_area < MIN_INTERSECTION_AREA:
         logging.debug(f"Объект {obj} не пересекается с участком или площадь пересечения меньше минимальной.")
         return None
 
-    # Корректировка координат
-    new_xmin = max(0, xmin - x1)
-    new_ymin = max(0, ymin - y1)
-    new_xmax = min(cropped_width, xmax - x1)
-    new_ymax = min(cropped_height, ymax - y1)
+    # Корректировка координат относительно вырезанного участка
+    new_xmin = intersect_xmin - x1
+    new_ymin = intersect_ymin - y1
+    new_xmax = intersect_xmax - x1
+    new_ymax = intersect_ymax - y1
 
-    # Проверка на корректность после обрезки.
+    # Проверка на корректность после обрезки
     if new_xmax <= new_xmin or new_ymax <= new_ymin:
         logging.debug(
             f"Объект {obj} обрезан некорректно: new_xmin={new_xmin}, new_ymin={new_ymin}, new_xmax={new_xmax}, new_ymax={new_ymax}")
         return None
 
-    object_id = int(obj.find("object_id").text) if obj.find(
-        "object_id") is not None else -1  # Если object_id не найден, возвращаем -1. Это должно быть обработано далее.
+    object_id = int(obj.find("object_id").text) if obj.find("object_id") is not None else -1
 
-    return object_id, new_xmin, new_ymin, new_xmax, new_ymax
+    return object_id, int(new_xmin), int(new_ymin), int(new_xmax), int(new_ymax)
 
 def generate_unique_object_id(image_path: str, line: str) -> int:
     """
@@ -266,13 +270,6 @@ def adjust_bndbox_yolo(line: str, image_path: Path, split_coords: Tuple[int, int
                        cropped_size: Tuple[int, int]) -> Optional[Tuple[str, int]]:
     """
     Корректирует координаты ограничивающего прямоугольника объекта относительно вырезанного участка для YOLO (TXT).
-
-    :param line: Строка с координатами объекта в формате YOLO (class x_center y_center width height [object_id]).
-    :param image_path: Путь к исходному изображению для генерации уникального object_id.
-    :param split_coords: Кортеж с координатами участка (x1, y1, x2, y2).
-    :param original_size: Размеры исходного изображения (width, height).
-    :param cropped_size: Размеры вырезанного изображения (width, height).
-    :return: Кортеж из строки с новыми координатами объекта и его object_id или None, если объект не попадает в разрез или имеет некорректные координаты.
     """
     try:
         parts = line.strip().split()
@@ -308,22 +305,26 @@ def adjust_bndbox_yolo(line: str, image_path: Path, split_coords: Tuple[int, int
     xmax = x_center_abs + width_abs / 2
     ymax = y_center_abs + height_abs / 2
 
-    # Проверка пересечения с разрезом
-    if xmax <= split_x1 or xmin >= split_x2 or ymax <= split_y1 or ymin >= split_y2:
+    # Вычисление пересечения
+    intersect_xmin = max(xmin, split_x1)
+    intersect_ymin = max(ymin, split_y1)
+    intersect_xmax = min(xmax, split_x2)
+    intersect_ymax = min(ymax, split_y2)
+
+    # Проверка на существование пересечения
+    if intersect_xmin >= intersect_xmax or intersect_ymin >= intersect_ymax:
         return None  # Объект не пересекается
 
+    # Вычисление площади пересечения
+    intersection_area = (intersect_xmax - intersect_xmin) * (intersect_ymax - intersect_ymin)
+    if intersection_area < MIN_INTERSECTION_AREA:
+        return None  # Площадь пересечения слишком мала
+
     # Корректировка координат относительно вырезанного участка
-    new_xmin = max(xmin, split_x1) - split_x1
-    new_ymin = max(ymin, split_y1) - split_y1
-    new_xmax = min(xmax, split_x2) - split_x1
-    new_ymax = min(ymax, split_y2) - split_y1
-
-    # Проверка минимальной площади пересечения
-    if (new_xmax - new_xmin) * (new_ymax - new_ymin) < MIN_INTERSECTION_AREA:
-        return None
-
-    if new_xmax <= new_xmin or new_ymax <= new_ymin:
-        return None
+    new_xmin = intersect_xmin - split_x1
+    new_ymin = intersect_ymin - split_y1
+    new_xmax = intersect_xmax - split_x1
+    new_ymax = intersect_ymax - split_y1
 
     # Преобразуем обратно в YOLO формат относительно вырезанного изображения
     new_width = new_xmax - new_xmin
@@ -441,7 +442,7 @@ def visualize_splits(image: np.ndarray, split_coords_list: List[Tuple[int, int, 
 
     for idx, (x1, y1, x2, y2) in enumerate(split_coords_list):
         color = (255, 0, 0)
-        thickness = 2
+        thickness = 1
         cv2.rectangle(image_copy, (x1, y1), (x2, y2), color, thickness)
         cv2.putText(image_copy, f"Split {idx+1}", (x1 + 5, y1 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
@@ -1078,8 +1079,6 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
         logging.error(f"Ошибка при инициализации или записи в CSV лог: {e}")
         sys.exit(1)
 
-    logging.info("Обработка всех изображений завершена.")
-
 def inverse_process_log(output_dir: Path) -> Dict[str, Dict]:
     """
     Обрабатывает лог-файл и собирает из аннотаций частей исходную аннотацию.
@@ -1481,6 +1480,8 @@ def main():
     # Удаление 'object_id' из всех аннотаций после сравнения
     remove_object_id_from_xml_files(OUTPUT_DIR)
     remove_object_id_from_txt_files(OUTPUT_DIR)
+
+    logging.info("Обработка всех изображений завершена.")
 
 if __name__ == "__main__":
     main()
