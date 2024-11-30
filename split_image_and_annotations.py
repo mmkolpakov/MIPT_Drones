@@ -1080,13 +1080,7 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
         sys.exit(1)
 
 def inverse_process_log(output_dir: Path) -> Dict[str, Dict]:
-    """
-    Обрабатывает лог-файл и собирает из аннотаций частей исходную аннотацию.
-
-    :param output_dir: Путь к директории с результатами и логом.
-    :return: Словарь с восстановленными аннотациями для каждого оригинального изображения.
-    """
-    reconstructed_annotations = defaultdict(lambda: {'objects': {}})
+    reconstructed_annotations = defaultdict(lambda: {'objects': defaultdict(list)})
 
     try:
         with LOG_CSV_PATH.open('r', newline='', encoding='utf-8') as csvfile:
@@ -1118,21 +1112,8 @@ def inverse_process_log(output_dir: Path) -> Dict[str, Dict]:
                             else:
                                 continue  # Пропускаем объекты без object_id
 
-                            # Проверяем, был ли объект уже добавлен
-                            if object_id not in reconstructed_annotations[original_image]['objects']:
-                                # Создаем новый объект с обновленными координатами
-                                new_obj = ET.Element("object")
-                                for elem in obj:
-                                    if elem.tag == "bndbox":
-                                        new_bndbox = ET.SubElement(new_obj, "bndbox")
-                                        ET.SubElement(new_bndbox, "xmin").text = str(xmin)
-                                        ET.SubElement(new_bndbox, "ymin").text = str(ymin)
-                                        ET.SubElement(new_bndbox, "xmax").text = str(xmax)
-                                        ET.SubElement(new_bndbox, "ymax").text = str(ymax)
-                                    else:
-                                        new_elem = ET.SubElement(new_obj, elem.tag)
-                                        new_elem.text = elem.text
-                                reconstructed_annotations[original_image]['objects'][object_id] = new_obj
+                            # Собираем все bounding boxes для каждого object_id
+                            reconstructed_annotations[original_image]['objects'][object_id].append((xmin, ymin, xmax, ymax))
                     except ET.ParseError as e:
                         logging.error(f"Ошибка парсинга XML аннотаций из '{split_annotation}': {e}")
                         continue
@@ -1184,27 +1165,40 @@ def inverse_process_log(output_dir: Path) -> Dict[str, Dict]:
                                 xmax = obj_x_center + obj_width_split / 2
                                 ymax = obj_y_center + obj_height_split / 2
 
-                                # Проверяем, был ли объект уже добавлен
-                                if object_id not in reconstructed_annotations[original_image]['objects']:
-                                    # Создаем новый объект в формате PASCAL VOC для удобства сравнения
-                                    new_obj = ET.Element("object")
-                                    ET.SubElement(new_obj, "name").text = str(class_id)
-                                    ET.SubElement(new_obj, "pose").text = "Unspecified"
-                                    ET.SubElement(new_obj, "truncated").text = "0"
-                                    ET.SubElement(new_obj, "difficult").text = "0"
-                                    ET.SubElement(new_obj, "object_id").text = str(object_id)
-                                    bndbox = ET.SubElement(new_obj, "bndbox")
-                                    ET.SubElement(bndbox, "xmin").text = str(int(xmin))
-                                    ET.SubElement(bndbox, "ymin").text = str(int(ymin))
-                                    ET.SubElement(bndbox, "xmax").text = str(int(xmax))
-                                    ET.SubElement(bndbox, "ymax").text = str(int(ymax))
-                                    reconstructed_annotations[original_image]['objects'][object_id] = new_obj
+                                # Собираем все bounding boxes для каждого object_id
+                                reconstructed_annotations[original_image]['objects'][object_id].append((xmin, ymin, xmax, ymax))
                     except Exception as e:
                         logging.error(f"Ошибка чтения YOLO аннотаций из '{split_annotation}': {e}")
                         continue
                 else:
                     logging.warning(f"Неизвестный формат аннотаций: {split_annotation_path.suffix}")
                     continue
+
+        # Объединяем bounding boxes для каждого object_id
+        for original_image, data in reconstructed_annotations.items():
+            for object_id, bboxes in data['objects'].items():
+                if len(bboxes) > 1:
+                    # Объединяем bounding boxes
+                    xmin = min(bbox[0] for bbox in bboxes)
+                    ymin = min(bbox[1] for bbox in bboxes)
+                    xmax = max(bbox[2] for bbox in bboxes)
+                    ymax = max(bbox[3] for bbox in bboxes)
+                else:
+                    xmin, ymin, xmax, ymax = bboxes[0]
+
+                # Создаем новый объект с объединённым bounding box
+                new_obj = ET.Element("object")
+                ET.SubElement(new_obj, "name").text = "class_name"  # Замените на реальное имя класса
+                ET.SubElement(new_obj, "object_id").text = str(object_id)
+                bndbox = ET.SubElement(new_obj, "bndbox")
+                ET.SubElement(bndbox, "xmin").text = str(int(xmin))
+                ET.SubElement(bndbox, "ymin").text = str(int(ymin))
+                ET.SubElement(bndbox, "xmax").text = str(int(xmax))
+                ET.SubElement(bndbox, "ymax").text = str(int(ymax))
+
+                # Заменяем список bounding boxes на объединённый объект
+                reconstructed_annotations[original_image]['objects'][object_id] = new_obj
+
     except FileNotFoundError:
         logging.error(f"Лог-файл не найден: {LOG_CSV_PATH}")
     except Exception as e:
@@ -1234,7 +1228,7 @@ def compute_iou(boxA, boxB):
 
 def compare_annotations(original_dir: Path, reconstructed_annotations: Dict[str, Dict]) -> None:
     """
-    Сравнивает исходные и восстановленные аннотации, выводя разницу в пикселях.
+    Сравнивает исходные и восстановленные аннотации, выводя разницу в пикселях и изменение площади.
 
     :param original_dir: Путь к директории с исходными изображениями и аннотациями.
     :param reconstructed_annotations: Словарь с восстановленными аннотациями.
@@ -1291,19 +1285,43 @@ def compare_annotations(original_dir: Path, reconstructed_annotations: Dict[str,
                         delta_xmax = abs(orig_bbox[2] - rec_bbox[2])
                         delta_ymax = abs(orig_bbox[3] - rec_bbox[3])
 
-                        delta_pixels = f"Delta_xmin: {delta_xmin:.2f}, Delta_ymin: {delta_ymin:.2f}, Delta_xmax: {delta_xmax:.2f}, Delta_ymax: {delta_ymax:.2f}"
+                        # Вычисляем площади
+                        orig_area = (orig_bbox[2] - orig_bbox[0]) * (orig_bbox[3] - orig_bbox[1])
+                        rec_area = (rec_bbox[2] - rec_bbox[0]) * (rec_bbox[3] - rec_bbox[1])
+
+                        if orig_area > 0:
+                            area_change_percent = ((rec_area - orig_area) / orig_area) * 100
+                        else:
+                            area_change_percent = 0.0
+
+                        delta_pixels = f"Delta_xmin: {delta_xmin:.2f}, Delta_ymin: {delta_ymin:.2f}, " \
+                                       f"Delta_xmax: {delta_xmax:.2f}, Delta_ymax: {delta_ymax:.2f}"
+                        area_change_str = f"{area_change_percent:.2f}%"
 
                         delta_results.append({
                             'Original Image': original_image,
                             'Object ID': object_id,
-                            'Delta Pixels': delta_pixels
+                            'Delta Pixels': delta_pixels,
+                            'Area Change (%)': area_change_str
                         })
                     else:
                         delta_results.append({
                             'Original Image': original_image,
                             'Object ID': object_id,
-                            'Delta Pixels': "Object not found in original annotations"
+                            'Delta Pixels': "Object not found in original annotations",
+                            'Area Change (%)': "N/A"
                         })
+
+                # Проверка объектов, отсутствующих в восстановленной аннотации
+                for object_id in original_bboxes.keys():
+                    if object_id not in reconstructed_objects:
+                        delta_results.append({
+                            'Original Image': original_image,
+                            'Object ID': object_id,
+                            'Delta Pixels': "Object not found in reconstructed annotations",
+                            'Area Change (%)': "N/A"
+                        })
+
             except Exception as e:
                 logging.error(f"Ошибка обработки XML аннотаций для '{original_annotation_path}': {e}")
                 continue
@@ -1315,6 +1333,14 @@ def compare_annotations(original_dir: Path, reconstructed_annotations: Dict[str,
                     original_yolo_annotations = [line.strip() for line in f if line.strip()]
 
                 original_bboxes = {}
+                original_image_path = Path(original_image)
+                # Загрузка изображения для получения размеров
+                image = load_image(original_image_path)
+                if image is None:
+                    logging.warning(f"Не удалось загрузить изображение для аннотаций: {original_image_path}")
+                    continue
+                img_height, img_width = image.shape[:2]
+
                 for line in original_yolo_annotations:
                     parts = line.strip().split()
                     if len(parts) == 6:
@@ -1322,8 +1348,6 @@ def compare_annotations(original_dir: Path, reconstructed_annotations: Dict[str,
                         object_id = int(object_id)
                     elif len(parts) == 5:
                         class_id, x_center, y_center, width, height = parts
-                        # Используем original_image_path при генерации object_id
-                        original_image_path = Path(original_image)
                         object_id = generate_unique_object_id(str(original_image_path), line)
                     else:
                         continue
@@ -1334,13 +1358,6 @@ def compare_annotations(original_dir: Path, reconstructed_annotations: Dict[str,
                     width = float(width)
                     height = float(height)
 
-                    # Загрузка изображения для получения размеров
-                    original_image_path = Path(original_image)
-                    image = load_image(original_image_path)
-                    if image is None:
-                        logging.warning(f"Не удалось загрузить изображение для аннотаций: {original_image_path}")
-                        continue
-                    img_height, img_width = image.shape[:2]
                     obj_x_center = x_center * img_width
                     obj_y_center = y_center * img_height
                     obj_width = width * img_width
@@ -1369,22 +1386,47 @@ def compare_annotations(original_dir: Path, reconstructed_annotations: Dict[str,
                         delta_xmax = abs(orig_bbox[2] - rec_bbox[2])
                         delta_ymax = abs(orig_bbox[3] - rec_bbox[3])
 
-                        delta_pixels = f"Delta_xmin: {delta_xmin:.2f}, Delta_ymin: {delta_ymin:.2f}, Delta_xmax: {delta_xmax:.2f}, Delta_ymax: {delta_ymax:.2f}"
+                        # Вычисляем площади
+                        orig_area = (orig_bbox[2] - orig_bbox[0]) * (orig_bbox[3] - orig_bbox[1])
+                        rec_area = (rec_bbox[2] - rec_bbox[0]) * (rec_bbox[3] - rec_bbox[1])
+
+                        if orig_area > 0:
+                            area_change_percent = ((rec_area - orig_area) / orig_area) * 100
+                        else:
+                            area_change_percent = 0.0
+
+                        delta_pixels = f"Delta_xmin: {delta_xmin:.2f}, Delta_ymin: {delta_ymin:.2f}, " \
+                                       f"Delta_xmax: {delta_xmax:.2f}, Delta_ymax: {delta_ymax:.2f}"
+                        area_change_str = f"{area_change_percent:.2f}%"
 
                         delta_results.append({
                             'Original Image': original_image,
                             'Object ID': object_id,
-                            'Delta Pixels': delta_pixels
+                            'Delta Pixels': delta_pixels,
+                            'Area Change (%)': area_change_str
                         })
                     else:
                         delta_results.append({
                             'Original Image': original_image,
                             'Object ID': object_id,
-                            'Delta Pixels': "Object not found in original annotations"
+                            'Delta Pixels': "Object not found in original annotations",
+                            'Area Change (%)': "N/A"
                         })
+
+                # Проверка объектов, отсутствующих в восстановленной аннотации
+                for object_id in original_bboxes.keys():
+                    if object_id not in reconstructed_objects:
+                        delta_results.append({
+                            'Original Image': original_image,
+                            'Object ID': object_id,
+                            'Delta Pixels': "Object not found in reconstructed annotations",
+                            'Area Change (%)': "N/A"
+                        })
+
             except Exception as e:
                 logging.error(f"Ошибка обработки YOLO аннотаций для '{original_annotation_path}': {e}")
                 continue
+
         else:
             logging.warning(f"Неизвестный формат аннотаций: {original_annotation_path.suffix}")
             continue
@@ -1392,7 +1434,7 @@ def compare_annotations(original_dir: Path, reconstructed_annotations: Dict[str,
     # Запись результатов сравнения в CSV
     try:
         with DELTA_PIXELS_CSV.open('w', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ['Original Image', 'Object ID', 'Delta Pixels']
+            fieldnames = ['Original Image', 'Object ID', 'Delta Pixels', 'Area Change (%)']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
             writer.writeheader()
