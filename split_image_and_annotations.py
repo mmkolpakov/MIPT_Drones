@@ -711,6 +711,10 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
         logging.info(f"Обработка части {idx} из {total_parts} (Координаты: {base_split})...")
         a_base, b_base, c_base, d_base = base_split
 
+        # Вычисляем размеры разреза
+        split_width = c_base - a_base
+        split_height = d_base - b_base
+
         best_cut = base_split
         best_min_percent = 0.0
         best_N = float('inf')
@@ -719,30 +723,46 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
 
         for attempt in range(nstep):
             if attempt == 0:
-                da, dc = 0, 0
+                dx, dy = 0, 0  # На первой попытке не смещаем
             else:
-                # Используем best_axis для определения направлений смещения
-                da = -step * attempt if best_axis[0] else 0
-                dc = -step * attempt if best_axis[1] else 0
+                dx = dy = 0  # Инициализация смещений
 
-            # Смещение разреза по необходимым осям
+                # Смещение по оси X
+                if best_axis[0]:
+                    if a_base > 0 and c_base < annotated_image.image_size_x:
+                        # Если можем двигаться в обе стороны, выбираем направление
+                        dx = -step * attempt if a_base >= annotated_image.image_size_x - c_base else step * attempt
+                    elif a_base > 0:
+                        dx = -step * attempt  # Смещаем влево
+                    elif c_base < annotated_image.image_size_x:
+                        dx = step * attempt  # Смещаем вправо
+
+                # Смещение по оси Y
+                if best_axis[1]:
+                    if b_base > 0 and d_base < annotated_image.image_size_y:
+                        # Если можем двигаться в обе стороны, выбираем направление
+                        dy = -step * attempt if b_base >= annotated_image.image_size_y - d_base else step * attempt
+                    elif b_base > 0:
+                        dy = -step * attempt  # Смещаем вверх
+                    elif d_base < annotated_image.image_size_y:
+                        dy = step * attempt  # Смещаем вниз
+
+                logging.debug(f"Попытка {attempt + 1}: Смещения (dx, dy) = ({dx}, {dy})")
+
+            # Обновляем текущий разрез с учетом смещений, сохраняя размер
             current_split = (
-                a_base + da,
-                b_base + dc,
-                c_base + da,
-                d_base + dc
+                a_base + dx,
+                b_base + dy,
+                a_base + dx + split_width,
+                b_base + dy + split_height
             )
-
-            # Вычисляем размеры разреза
-            split_width = current_split[2] - current_split[0]
-            split_height = current_split[3] - current_split[1]
 
             # Корректируем координаты, чтобы разрез полностью помещался в изображение
             if current_split[0] < 0:
                 current_split = (
                     0,
                     current_split[1],
-                    split_width,
+                    0 + split_width,
                     current_split[3]
                 )
             if current_split[2] > annotated_image.image_size_x:
@@ -757,7 +777,7 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
                     current_split[0],
                     0,
                     current_split[2],
-                    split_height
+                    0 + split_height
                 )
             if current_split[3] > annotated_image.image_size_y:
                 current_split = (
@@ -767,9 +787,9 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
                     annotated_image.image_size_y
                 )
 
-            # Проверяем, что разрез корректен
-            if current_split[0] < 0 or current_split[1] < 0 or current_split[2] > annotated_image.image_size_x or \
-                    current_split[3] > annotated_image.image_size_y:
+            # Проверяем, что после коррекции разрез корректен
+            if current_split[0] < 0 or current_split[1] < 0 or \
+               current_split[2] > annotated_image.image_size_x or current_split[3] > annotated_image.image_size_y:
                 logging.debug(f"Попытка {attempt + 1}: разрез выходит за пределы изображения {current_split}. Пропуск.")
                 continue
 
@@ -797,8 +817,8 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
             logging.info(f"Идеальный разрез не найден для части {idx}. Выбирается наилучший доступный вариант.")
 
         # Вырезаем изображение и аннотации по выбранному разрезу
-        split_image_data, split_image_path, split_x, split_y, object_ids_in_crop = cut_with_annotation(annotated_image,
-                                                                                                       best_cut, idx)
+        split_image_data, split_image_path, split_x, split_y, object_ids_in_crop = cut_with_annotation(
+            annotated_image, best_cut, idx)
         image_result.append((split_image_data, split_image_path, split_x, split_y, object_ids_in_crop, best_cut))
 
     return image_result
