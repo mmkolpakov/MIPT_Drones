@@ -514,7 +514,7 @@ def adjust_augmentation_mapping(distribution: Dict[str, int]) -> Dict[str, str]:
         class_augmentation_mapping[classes_with_max_count[1]] = 'horizontal_flip'
         for class_name, _ in sorted_classes:
             if class_name not in class_augmentation_mapping:
-                class_augmentation_mapping[class_name] = 'color_jitter'
+                class_augmentation_mapping[class_name] = 'horizontal_flip'
     else:
         # Если один класс имеет максимальное количество изображений
         class_augmentation_mapping[sorted_classes[0][0]] = 'blur'
@@ -522,7 +522,7 @@ def adjust_augmentation_mapping(distribution: Dict[str, int]) -> Dict[str, str]:
             class_augmentation_mapping[sorted_classes[1][0]] = 'horizontal_flip'
         for class_name, _ in sorted_classes:
             if class_name not in class_augmentation_mapping:
-                class_augmentation_mapping[class_name] = 'color_jitter'
+                class_augmentation_mapping[class_name] = 'horizontal_flip'
 
     logging.debug(f"Сопоставление аугментаций: {class_augmentation_mapping}")
     return class_augmentation_mapping
@@ -568,7 +568,7 @@ def process_duplicates(duplicates_dir: Path, output_dir: Path, image_format: str
         class_name = f"_{match.group(1)}"
 
         # Получаем функцию аугментации для этого класса
-        augmentation_name = class_augmentation_mapping.get(class_name, 'color_jitter')
+        augmentation_name = class_augmentation_mapping.get(class_name, 'horizontal_flip')  # Заменили 'color_jitter' на 'horizontal_flip'
         augmentation_function = AUGMENTATION_FUNCTIONS.get(augmentation_name)
 
         if augmentation_function is None:

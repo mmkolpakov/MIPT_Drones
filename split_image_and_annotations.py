@@ -347,7 +347,8 @@ def get_color(idx):
     Возвращает цвет в формате (B, G, R) на основе индекса.
     """
     idx = idx * 3  # Чтобы избежать похожих цветов для последовательных индексов
-    color = ((37 * idx) % 255, (17 * idx) % 255, (29 * idx) % 255)
+    color = ((37 * idx) % 255, (17 * idx) % 255
+             , (29 * idx) % 255)
     return color
 
 def visualize_annotations(image: np.ndarray, annotations: Union[ET.Element, List[str]], annotation_format: str,
@@ -378,7 +379,8 @@ def visualize_annotations(image: np.ndarray, annotations: Union[ET.Element, List
                 else:
                     object_id = -1
                 label = f"{class_name}:{object_id}"
-                color = get_color(object_id)
+                # color = get_color(object_id)
+                color = (255, 0, 0)
                 cv2.rectangle(image_copy, (xmin, ymin), (xmax, ymax), color, 2)
                 cv2.putText(image_copy, label, (xmin, ymin - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
             except Exception as e:
@@ -407,7 +409,8 @@ def visualize_annotations(image: np.ndarray, annotations: Union[ET.Element, List
                 xmax = int(x_center_abs + w_abs / 2)
                 ymax = int(y_center_abs + h_abs / 2)
                 label = f"{class_id}:{object_id}"
-                color = get_color(object_id)
+                # color = get_color(object_id)
+                color = (255, 0, 0)
                 cv2.rectangle(image_copy, (xmin, ymin), (xmax, ymax), color, 2)
                 cv2.putText(image_copy, label, (xmin, ymin - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
             except Exception as e:
@@ -703,7 +706,7 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
 
     # Параметры сдвига
     step = 15  # шаг смещения в пикселях
-    nstep = 10  # количество попыток сдвига
+    nstep = 40  # количество попыток сдвига
 
     image_result = []  # список вырезанных изображений и их позиций
 
@@ -720,7 +723,8 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
         best_N = float('inf')
         best_axis = (True, True)  # По умолчанию смещаем по обеим осям
         done = False
-
+        attempt_x = 0
+        attempt_y = 0
         for attempt in range(nstep):
             if attempt == 0:
                 dx, dy = 0, 0  # На первой попытке не смещаем
@@ -729,25 +733,27 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
 
                 # Смещение по оси X
                 if best_axis[0]:
+                    attempt_x = attempt_x + 1
                     if a_base > 0 and c_base < annotated_image.image_size_x:
                         # Если можем двигаться в обе стороны, выбираем направление
-                        dx = -step * attempt if a_base >= annotated_image.image_size_x - c_base else step * attempt
+                        dx = -step * attempt_x if a_base >= annotated_image.image_size_x - c_base else step * attempt_x
                     elif a_base > 0:
-                        dx = -step * attempt  # Смещаем влево
+                        dx = -step * attempt_x  # Смещаем влево
                     elif c_base < annotated_image.image_size_x:
-                        dx = step * attempt  # Смещаем вправо
+                        dx = step * attempt_x  # Смещаем вправо
 
                 # Смещение по оси Y
                 if best_axis[1]:
+                    attempt_y = attempt_y + 1
                     if b_base > 0 and d_base < annotated_image.image_size_y:
                         # Если можем двигаться в обе стороны, выбираем направление
-                        dy = -step * attempt if b_base >= annotated_image.image_size_y - d_base else step * attempt
+                        dy = -step * attempt_y if b_base >= annotated_image.image_size_y - d_base else step * attempt_y
                     elif b_base > 0:
-                        dy = -step * attempt  # Смещаем вверх
+                        dy = -step * attempt_y  # Смещаем вверх
                     elif d_base < annotated_image.image_size_y:
-                        dy = step * attempt  # Смещаем вниз
+                        dy = step * attempt_y  # Смещаем вниз
 
-                logging.debug(f"Попытка {attempt + 1}: Смещения (dx, dy) = ({dx}, {dy})")
+                logging.debug(f"Попытка {attempt + 1} ({attempt_x},{attempt_y}): Смещения (dx, dy) = ({dx}, {dy})")
 
             # Обновляем текущий разрез с учетом смещений, сохраняя размер
             current_split = (
@@ -807,19 +813,22 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
                 logging.debug("Идеальный разрез найден.")
                 break
             else:
-                if min_percent > best_min_percent or (min_percent == best_min_percent and N < best_N):
+                if min_percent > best_min_percent or (min_percent > 0.5*best_min_percent and N < best_N):
                     best_min_percent = min_percent
                     best_cut = current_split
                     best_N = N
                     best_axis = axis
+                else:
+                    best_axis = axis
+                    logging.debug("Не делаем")
 
         if not done:
             logging.info(f"Идеальный разрез не найден для части {idx}. Выбирается наилучший доступный вариант.")
-
-        # Вырезаем изображение и аннотации по выбранному разрезу
-        split_image_data, split_image_path, split_x, split_y, object_ids_in_crop = cut_with_annotation(
-            annotated_image, best_cut, idx)
-        image_result.append((split_image_data, split_image_path, split_x, split_y, object_ids_in_crop, best_cut))
+        else:
+            # Вырезаем изображение и аннотации по выбранному разрезу
+            split_image_data, split_image_path, split_x, split_y, object_ids_in_crop = cut_with_annotation(
+                annotated_image, best_cut, idx)
+            image_result.append((split_image_data, split_image_path, split_x, split_y, object_ids_in_crop, best_cut))
 
     return image_result
 
@@ -875,7 +884,6 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
                 'Split Position Y',
                 'Split Annotation'
             ])
-
             for image_path in image_files:
                 # Поиск соответствующего файла аннотаций
                 annotation_path = None
