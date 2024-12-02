@@ -47,9 +47,11 @@ LOG_CSV_PATH = OUTPUT_DIR / "process_log.csv"
 # Путь к файлу для сравнения аннотаций
 DELTA_PIXELS_CSV = OUTPUT_DIR / "delta_pixels.csv"
 
+
 class NamingMethod(Enum):
     COORDINATES = 1
     NUMERICAL = 2
+
 
 # Способ именования: NamingMethod.COORDINATES или NamingMethod.NUMERICAL
 NAMING_METHOD = NamingMethod.NUMERICAL
@@ -73,6 +75,7 @@ VISUALIZE_SPLITS_ON_ANNOTATIONS = True  # Установите True, чтобы 
 
 REMOVE_OBJECT_ID = True  # Установите True, если нужно удалить поле 'object_id' из аннотаций
 
+
 # -----------------------------------------------------------------
 
 class ImageData:
@@ -84,6 +87,7 @@ class ImageData:
         self.data = data
         self.image_size_x = image_size_x
         self.image_size_y = image_size_y
+
 
 class AnnotatedImageData(ImageData):
     """
@@ -101,6 +105,7 @@ class AnnotatedImageData(ImageData):
         self.image_path = image_path  # Путь к текущему изображению
         self.object_ids = object_ids if object_ids is not None else []  # Список object_id для каждого объекта
 
+
 def load_image(image_path: Path) -> Optional[np.ndarray]:
     """
     Загружает изображение с поддержкой путей с нелатинскими символами.
@@ -116,6 +121,7 @@ def load_image(image_path: Path) -> Optional[np.ndarray]:
     except Exception as e:
         logging.error(f"Ошибка при загрузке изображения '{image_path}': {e}")
         return None
+
 
 def save_image(img: np.ndarray, output_path: Path, image_format: str) -> None:
     """
@@ -139,6 +145,7 @@ def save_image(img: np.ndarray, output_path: Path, image_format: str) -> None:
     except Exception as e:
         logging.error(f"Ошибка при сохранении изображения '{output_path}': {e}")
         raise
+
 
 def calculate_split_coordinates(
         width: int,
@@ -208,6 +215,7 @@ def calculate_split_coordinates(
 
     return coords
 
+
 def adjust_bndbox_voc(obj: ET.Element, bndbox: ET.Element, split_coords: Tuple[int, int, int, int],
                       cropped_size: Tuple[int, int]) -> Optional[Tuple[int, int, int, int, int]]:
     """
@@ -258,12 +266,14 @@ def adjust_bndbox_voc(obj: ET.Element, bndbox: ET.Element, split_coords: Tuple[i
 
     return object_id, int(new_xmin), int(new_ymin), int(new_xmax), int(new_ymax)
 
+
 def generate_unique_object_id(image_path: str, line: str) -> int:
     """
     Генерирует уникальный object_id на основе имени файла и строки аннотации.
     """
     hash_string = f"{image_path}_{line}".encode('utf-8')
     return int(hashlib.md5(hash_string).hexdigest(), 16) % 1000000  # Ограничиваем object_id до 6 знаков
+
 
 def adjust_bndbox_yolo(line: str, image_path: Path, split_coords: Tuple[int, int, int, int],
                        original_size: Tuple[int, int],
@@ -342,6 +352,7 @@ def adjust_bndbox_yolo(line: str, image_path: Path, split_coords: Tuple[int, int
 
     return new_line, object_id
 
+
 def get_color(idx):
     """
     Возвращает цвет в формате (B, G, R) на основе индекса.
@@ -350,6 +361,7 @@ def get_color(idx):
     color = ((37 * idx) % 255, (17 * idx) % 255
              , (29 * idx) % 255)
     return color
+
 
 def visualize_annotations(image: np.ndarray, annotations: Union[ET.Element, List[str]], annotation_format: str,
                           output_path: Path) -> None:
@@ -425,6 +437,7 @@ def visualize_annotations(image: np.ndarray, annotations: Union[ET.Element, List
     except Exception as e:
         logging.error(f"Ошибка при сохранении визуализации аннотаций: {e}")
 
+
 def visualize_splits(image: np.ndarray, split_coords_list: List[Tuple[int, int, int, int]], output_path: Path,
                      annotations: Optional[Union[ET.Element, List[str]]] = None,
                      annotation_format: Optional[str] = None) -> None:
@@ -447,13 +460,14 @@ def visualize_splits(image: np.ndarray, split_coords_list: List[Tuple[int, int, 
         color = (255, 0, 0)
         thickness = 1
         cv2.rectangle(image_copy, (x1, y1), (x2, y2), color, thickness)
-        cv2.putText(image_copy, f"Split {idx+1}", (x1 + 5, y1 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        cv2.putText(image_copy, f"Split {idx + 1}", (x1 + 5, y1 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
     try:
         save_image(image_copy, output_path, IMAGE_FORMAT)
         logging.debug(f"Визуализация разрезов сохранена: {output_path}")
     except Exception as e:
         logging.error(f"Ошибка при сохранении визуализации разрезов: {e}")
+
 
 def cut_with_annotation(annotated_image: AnnotatedImageData, cut_set: Tuple[int, int, int, int],
                         split_idx: int) -> Tuple[AnnotatedImageData, Path, int, int, Set[int]]:
@@ -580,6 +594,7 @@ def cut_with_annotation(annotated_image: AnnotatedImageData, cut_set: Tuple[int,
 
     return split_image_data, new_image_path, x1, y1, object_ids_in_crop
 
+
 def verify(annotated_image: AnnotatedImageData, cut_set: Tuple[int, int, int, int]) -> Tuple[
     int, float, Tuple[bool, bool]]:
     """
@@ -686,12 +701,15 @@ def verify(annotated_image: AnnotatedImageData, cut_set: Tuple[int, int, int, in
         logging.error(f"Неизвестный формат аннотаций: {annotated_image.annotation_format}")
         return N, min_percent, axis
 
-def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageData, Path, int, int, Set[int], Tuple[int, int, int, int]]]:
+
+def multi_cut(annotated_image: AnnotatedImageData) -> List[
+    Tuple[AnnotatedImageData, Path, int, int, Set[int], Tuple[int, int, int, int]]]:
     """
     Разделяет изображение и аннотации на сетку с заданными параметрами, корректируя разрезы для сохранения размеров и позиций.
 
     :param annotated_image: Объект AnnotatedImageData с исходными данными.
-    :return: Список кортежей из AnnotatedImageData с вырезанными частями, пути к новым изображениям, позиций (x1, y1), множеств object_id и координат разрезов.
+    :return: Список кортежей из AnnotatedImageData с вырезанными частями, пути к новым изображениям, позиций (x1, y1),
+             множеств object_id и координат разрезов.
     """
     # Вычисление базовых координат разреза
     split_coords_list = calculate_split_coordinates(
@@ -706,7 +724,8 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
 
     # Параметры сдвига
     step = 15  # шаг смещения в пикселях
-    nstep = 40  # количество попыток сдвига
+    max_attempts_x = 40  # максимальное количество попыток смещения по оси X
+    max_attempts_y = 40  # максимальное количество попыток смещения по оси Y
 
     image_result = []  # список вырезанных изображений и их позиций
 
@@ -721,40 +740,21 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
         best_cut = base_split
         best_min_percent = 0.0
         best_N = float('inf')
-        best_axis = (True, True)  # По умолчанию смещаем по обеим осям
         done = False
-        attempt_x = 0
-        attempt_y = 0
-        for attempt in range(nstep):
-            if attempt == 0:
-                dx, dy = 0, 0  # На первой попытке не смещаем
-            else:
-                dx = dy = 0  # Инициализация смещений
 
-                # Смещение по оси X
-                if best_axis[0]:
-                    attempt_x = attempt_x + 1
-                    if a_base > 0 and c_base < annotated_image.image_size_x:
-                        # Если можем двигаться в обе стороны, выбираем направление
-                        dx = -step * attempt_x if a_base >= annotated_image.image_size_x - c_base else step * attempt_x
-                    elif a_base > 0:
-                        dx = -step * attempt_x  # Смещаем влево
-                    elif c_base < annotated_image.image_size_x:
-                        dx = step * attempt_x  # Смещаем вправо
+        # Определяем направления смещения
+        directions_x = [0] + [step * i for i in range(1, max_attempts_x + 1)] + [-step * i for i in
+                                                                                 range(1, max_attempts_x + 1)]
+        directions_y = [0] + [step * i for i in range(1, max_attempts_y + 1)] + [-step * i for i in
+                                                                                 range(1, max_attempts_y + 1)]
 
-                # Смещение по оси Y
-                if best_axis[1]:
-                    attempt_y = attempt_y + 1
-                    if b_base > 0 and d_base < annotated_image.image_size_y:
-                        # Если можем двигаться в обе стороны, выбираем направление
-                        dy = -step * attempt_y if b_base >= annotated_image.image_size_y - d_base else step * attempt_y
-                    elif b_base > 0:
-                        dy = -step * attempt_y  # Смещаем вверх
-                    elif d_base < annotated_image.image_size_y:
-                        dy = step * attempt_y  # Смещаем вниз
+        directions_x = list(set(directions_x))
+        directions_y = list(set(directions_y))
 
-                logging.debug(f"Попытка {attempt + 1} ({attempt_x},{attempt_y}): Смещения (dx, dy) = ({dx}, {dy})")
+        # Генерируем все комбинации смещений по осям X и Y
+        shift_combinations = [(dx, dy) for dx in directions_x for dy in directions_y]
 
+        for dx, dy in shift_combinations:
             # Обновляем текущий разрез с учетом смещений, сохраняя размер
             current_split = (
                 a_base + dx,
@@ -764,75 +764,54 @@ def multi_cut(annotated_image: AnnotatedImageData) -> List[Tuple[AnnotatedImageD
             )
 
             # Корректируем координаты, чтобы разрез полностью помещался в изображение
-            if current_split[0] < 0:
-                current_split = (
-                    0,
-                    current_split[1],
-                    0 + split_width,
-                    current_split[3]
-                )
-            if current_split[2] > annotated_image.image_size_x:
-                current_split = (
-                    annotated_image.image_size_x - split_width,
-                    current_split[1],
-                    annotated_image.image_size_x,
-                    current_split[3]
-                )
-            if current_split[1] < 0:
-                current_split = (
-                    current_split[0],
-                    0,
-                    current_split[2],
-                    0 + split_height
-                )
-            if current_split[3] > annotated_image.image_size_y:
-                current_split = (
-                    current_split[0],
-                    annotated_image.image_size_y - split_height,
-                    current_split[2],
-                    annotated_image.image_size_y
-                )
+            if current_split[0] < 0 or current_split[2] > annotated_image.image_size_x or \
+                    current_split[1] < 0 or current_split[3] > annotated_image.image_size_y:
+                continue  # Пропускаем разрезы, выходящие за пределы изображения
 
             # Проверяем, что после коррекции разрез корректен
-            if current_split[0] < 0 or current_split[1] < 0 or \
-               current_split[2] > annotated_image.image_size_x or current_split[3] > annotated_image.image_size_y:
-                logging.debug(f"Попытка {attempt + 1}: разрез выходит за пределы изображения {current_split}. Пропуск.")
-                continue
-
             if current_split[0] >= current_split[2] or current_split[1] >= current_split[3]:
-                logging.debug(f"Попытка {attempt + 1}: некорректный разрез {current_split}. Пропуск.")
                 continue
 
             # Проверяем, не пересекает ли текущий разрез объекты
             N, min_percent, axis = verify(annotated_image, current_split)
-            logging.debug(f"Попытка {attempt + 1}: N={N}, min_percent={min_percent:.2f}, axis={axis}")
 
             if N == 0:
                 best_cut = current_split
                 done = True
-                logging.debug("Идеальный разрез найден.")
-                break
+                logging.debug(f"Идеальный разрез найден с dx={dx}, dy={dy}.")
+                break  # Выходим из цикла, т.к. идеальный разрез найден
             else:
-                if min_percent > best_min_percent or (min_percent > 0.5*best_min_percent and N < best_N):
+                # Сохраняем разрез с минимальным количеством пересечений и максимальной долей объекта внутри
+                if min_percent > best_min_percent or (min_percent == best_min_percent and N < best_N):
                     best_min_percent = min_percent
                     best_cut = current_split
                     best_N = N
-                    best_axis = axis
-                else:
-                    best_axis = axis
-                    logging.debug("Не делаем")
 
         if not done:
             logging.info(f"Идеальный разрез не найден для части {idx}. Выбирается наилучший доступный вариант.")
-        else:
-            # Вырезаем изображение и аннотации по выбранному разрезу
-            split_image_data, split_image_path, split_x, split_y, object_ids_in_crop = cut_with_annotation(
-                annotated_image, best_cut, idx)
-            image_result.append((split_image_data, split_image_path, split_x, split_y, object_ids_in_crop, best_cut))
+
+        # Проверяем, что размеры итоговых изображений совпадают с ожидаемыми
+        expected_width = split_width
+        expected_height = split_height
+        actual_width = best_cut[2] - best_cut[0]
+        actual_height = best_cut[3] - best_cut[1]
+
+        if actual_width != expected_width or actual_height != expected_height:
+            logging.warning(f"Размер итогового изображения отличается от ожидаемого для части {idx}. "
+                            f"Ожидалось ({expected_width}, {expected_height}), "
+                            f"получено ({actual_width}, {actual_height}). Пропуск.")
+            continue  # Пропускаем этот разрез, так как размеры не совпадают
+
+        # Вырезаем изображение и аннотации по выбранному разрезу
+        split_image_data, split_image_path, split_x, split_y, object_ids_in_crop = cut_with_annotation(
+            annotated_image, best_cut, idx)
+        image_result.append((split_image_data, split_image_path, split_x, split_y, object_ids_in_crop, best_cut))
 
     return image_result
 
+
 global_object_id_counter = 1
+
 
 def process_all_images(input_dir: Path, output_dir: Path) -> None:
     """
@@ -1051,7 +1030,8 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
                     # Визуализация аннотаций на подснимках
                     if VISUALIZE_SPLITS:
                         vis_image_path = ANNOTATED_SPLITS_DIR / f"{split_image_path.stem}_annotated{IMAGE_FORMAT}"
-                        visualize_annotations(split_img_data.data, split_img_data.annotation, annotation_format, vis_image_path)
+                        visualize_annotations(split_img_data.data, split_img_data.annotation, annotation_format,
+                                              vis_image_path)
 
                     # Запись в CSV лог
                     log_writer.writerow([
@@ -1107,6 +1087,7 @@ def process_all_images(input_dir: Path, output_dir: Path) -> None:
         logging.error(f"Ошибка при инициализации или записи в CSV лог: {e}")
         sys.exit(1)
 
+
 def inverse_process_log(output_dir: Path) -> Dict[str, Dict]:
     reconstructed_annotations = defaultdict(lambda: {'objects': defaultdict(list)})
 
@@ -1141,7 +1122,8 @@ def inverse_process_log(output_dir: Path) -> Dict[str, Dict]:
                                 continue  # Пропускаем объекты без object_id
 
                             # Собираем все bounding boxes для каждого object_id
-                            reconstructed_annotations[original_image]['objects'][object_id].append((xmin, ymin, xmax, ymax))
+                            reconstructed_annotations[original_image]['objects'][object_id].append(
+                                (xmin, ymin, xmax, ymax))
                     except ET.ParseError as e:
                         logging.error(f"Ошибка парсинга XML аннотаций из '{split_annotation}': {e}")
                         continue
@@ -1194,7 +1176,8 @@ def inverse_process_log(output_dir: Path) -> Dict[str, Dict]:
                                 ymax = obj_y_center + obj_height_split / 2
 
                                 # Собираем все bounding boxes для каждого object_id
-                                reconstructed_annotations[original_image]['objects'][object_id].append((xmin, ymin, xmax, ymax))
+                                reconstructed_annotations[original_image]['objects'][object_id].append(
+                                    (xmin, ymin, xmax, ymax))
                     except Exception as e:
                         logging.error(f"Ошибка чтения YOLO аннотаций из '{split_annotation}': {e}")
                         continue
@@ -1234,6 +1217,7 @@ def inverse_process_log(output_dir: Path) -> Dict[str, Dict]:
 
     return reconstructed_annotations
 
+
 def compute_iou(boxA, boxB):
     # Координаты пересечения
     xA = max(boxA[0], boxB[0])
@@ -1253,6 +1237,7 @@ def compute_iou(boxA, boxB):
     # IoU
     iou = interArea / float(boxAArea + boxBArea - interArea)
     return iou
+
 
 def compare_annotations(original_dir: Path, reconstructed_annotations: Dict[str, Dict]) -> None:
     """
@@ -1472,6 +1457,7 @@ def compare_annotations(original_dir: Path, reconstructed_annotations: Dict[str,
     except Exception as e:
         logging.error(f"Ошибка при записи результатов сравнения в CSV: {e}")
 
+
 def remove_object_id_from_xml_files(output_dir: Path):
     """
     Удаляет элементы 'object_id' из всех XML-аннотаций в заданной директории рекурсивно.
@@ -1490,6 +1476,7 @@ def remove_object_id_from_xml_files(output_dir: Path):
             logging.debug(f"Удалено 'object_id' из файла: {xml_file}")
         except Exception as e:
             logging.error(f"Ошибка при обработке файла '{xml_file}': {e}")
+
 
 def remove_object_id_from_txt_files(output_dir: Path):
     """
@@ -1515,6 +1502,7 @@ def remove_object_id_from_txt_files(output_dir: Path):
             logging.debug(f"Удалено 'object_id' из файла: {txt_file}")
         except Exception as e:
             logging.error(f"Ошибка при обработке файла '{txt_file}': {e}")
+
 
 def main():
     """
@@ -1552,6 +1540,7 @@ def main():
     remove_object_id_from_txt_files(OUTPUT_DIR)
 
     logging.info("Обработка всех изображений завершена.")
+
 
 if __name__ == "__main__":
     main()
